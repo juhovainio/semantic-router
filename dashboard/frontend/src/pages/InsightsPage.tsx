@@ -218,7 +218,14 @@ export default function InsightsPage() {
         </div>
       ) : null}
 
-      {aggregate ? <InsightsCharts aggregate={aggregate} /> : null}
+      {aggregate ? (
+        <InsightsCharts
+          aggregate={aggregate}
+          autoRefresh={autoRefresh}
+          onAutoRefreshChange={setAutoRefresh}
+          onRefresh={() => void fetchRecords()}
+        />
+      ) : null}
 
       <div className={configStyles.sectionPanel}>
         <section className={configStyles.sectionTableBlock}>

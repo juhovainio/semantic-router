@@ -209,6 +209,34 @@ export interface InsightsAggregateTokenBreakdown {
   by_selected_model: InsightsAggregateTokenEntry[]
 }
 
+export interface InsightsAggregateCostEntry {
+  name: string
+  actual_cost: number
+  baseline_cost: number
+}
+
+export interface InsightsRequestTimelinePoint {
+  timestamp: string
+  counts: Record<string, number>
+}
+
+export interface InsightsRequestTimeline {
+  bucket_interval: string
+  models: string[]
+  points: InsightsRequestTimelinePoint[]
+}
+
+export interface InsightsTokenTimelinePoint {
+  timestamp: string
+  input_tokens: number
+  output_tokens: number
+}
+
+export interface InsightsTokenTimeline {
+  bucket_interval: string
+  points: InsightsTokenTimelinePoint[]
+}
+
 export interface InsightsAggregateResponse {
   object: string
   record_count: number
@@ -218,6 +246,9 @@ export interface InsightsAggregateResponse {
   signal_distribution: InsightsAggregateValue[]
   token_volume: InsightsAggregateTokenVolume
   token_breakdown: InsightsAggregateTokenBreakdown
+  cost_by_model: InsightsAggregateCostEntry[]
+  request_timeline: InsightsRequestTimeline
+  token_timeline: InsightsTokenTimeline
   available_decisions: string[]
   available_models: string[]
 }
