@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,7 @@ func TestRequiresAuthentication(t *testing.T) {
 		{path: "/dashboard", expected: false},
 		{path: "/login", expected: false},
 		{path: "/api/auth/login", expected: false},
+		{path: "/api/auth/logout", expected: false},
 		{path: "/api/auth/bootstrap/can-register", expected: false},
 		{path: "/api/setup/state", expected: false},
 		{path: "/api/auth/me", expected: true},
@@ -36,13 +38,55 @@ func TestRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestServiceUnavailableGuard(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		path     string
+		wantCode int
+		wantNext bool
+	}{
+		{name: "protected api denied", path: "/api/router/config", wantCode: http.StatusServiceUnavailable, wantNext: false},
+		{name: "admin denied", path: "/api/admin/users", wantCode: http.StatusServiceUnavailable, wantNext: false},
+		{name: "embedded denied", path: "/embedded/grafana/", wantCode: http.StatusServiceUnavailable, wantNext: false},
+		{name: "login public", path: "/api/auth/login", wantCode: http.StatusOK, wantNext: true},
+		{name: "setup state public", path: "/api/setup/state", wantCode: http.StatusOK, wantNext: true},
+		{name: "static frontend public", path: "/dashboard", wantCode: http.StatusOK, wantNext: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			nextCalled := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				nextCalled = true
+				w.WriteHeader(http.StatusOK)
+			})
+			handler := ServiceUnavailableGuard()(next)
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if nextCalled != tc.wantNext {
+				t.Fatalf("next handler called = %v, want %v", nextCalled, tc.wantNext)
+			}
+		})
+	}
+}
+
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
 
 	t.Run("prefers bearer header", func(t *testing.T) {
 		t.Parallel()
 		req := httptest.NewRequest(http.MethodGet, "/api/status?authToken=query-token", nil)
-		req.Header.Set("Authorization", "Bearer header-token")
+		req.Header.Set("Authorization", "Bearer  header-token ")
 
 		if token := extractAccessToken(req); token != "header-token" {
 			t.Fatalf("extractAccessToken() = %q, want header-token", token)
@@ -67,6 +111,55 @@ func TestExtractAccessToken(t *testing.T) {
 			t.Fatalf("extractAccessToken() = %q, want cookie-token", token)
 		}
 	})
+
+	t.Run("skips malformed bearer and uses cookie token", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodGet, "/api/status?authToken=query-token", nil)
+		req.Header.Set("Authorization", "Bearer invalid token")
+		req.AddCookie(&http.Cookie{Name: authSessionCookieName, Value: "cookie-token"})
+
+		if token := extractAccessToken(req); token != "cookie-token" {
+			t.Fatalf("extractAccessToken() = %q, want cookie-token", token)
+		}
+	})
+
+	t.Run("rejects malformed query token", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodGet, "/embedded/grafana/?authToken=invalid%20token", nil)
+
+		if token := extractAccessToken(req); token != "" {
+			t.Fatalf("extractAccessToken() = %q, want empty", token)
+		}
+	})
+}
+
+func TestNormalizeAccessToken(t *testing.T) {
+	t.Parallel()
+
+	if token := normalizeAccessToken("  header-token_123.abc-def  "); token != "header-token_123.abc-def" {
+		t.Fatalf("normalizeAccessToken() = %q, want trimmed token", token)
+	}
+
+	testCases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty", raw: ""},
+		{name: "space", raw: "invalid token"},
+		{name: "tab", raw: "invalid\ttoken"},
+		{name: "newline", raw: "invalid\ntoken"},
+		{name: "semicolon", raw: "invalid;token"},
+		{name: "oversized", raw: strings.Repeat("a", maxAccessTokenBytes+1)},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if token := normalizeAccessToken(tc.raw); token != "" {
+				t.Fatalf("normalizeAccessToken(%q) = %q, want empty", tc.raw, token)
+			}
+		})
+	}
 }
 
 func TestRequiredPermission(t *testing.T) {

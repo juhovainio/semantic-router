@@ -9,10 +9,11 @@ COPY src/semantic-router/ ./
 
 # Local replace directives point at sibling bindings that are not needed for the
 # WASM build. Stub them under /app so `../../*-binding` resolves correctly.
-RUN mkdir -p /app/candle-binding /app/ml-binding /app/nlp-binding && \
+RUN mkdir -p /app/candle-binding /app/ml-binding /app/nlp-binding /app/openvino-binding && \
     echo 'module github.com/vllm-project/semantic-router/candle-binding' > /app/candle-binding/go.mod && \
     echo 'module github.com/vllm-project/semantic-router/ml-binding' > /app/ml-binding/go.mod && \
-    echo 'module github.com/vllm-project/semantic-router/nlp-binding' > /app/nlp-binding/go.mod
+    echo 'module github.com/vllm-project/semantic-router/nlp-binding' > /app/nlp-binding/go.mod && \
+    echo 'module github.com/vllm-project/semantic-router/openvino-binding' > /app/openvino-binding/go.mod
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=js GOARCH=wasm go build \
       -buildvcs=false \
@@ -94,6 +95,8 @@ RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 
 # Stage 3: Final runtime image
 FROM python:3.11-slim-bookworm
+ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG TORCH_CPU_VERSION=2.12.0
 ENV PYTHONPATH=/app
 ENV VIRTUAL_ENV=/opt/vllm-sr-dashboard-venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
@@ -129,6 +132,7 @@ COPY dashboard/backend/skillpacks/ /app/skills/
 COPY dashboard/backend/entrypoint.sh /app/entrypoint.sh
 RUN python3 -m venv "${VIRTUAL_ENV}" && \
     "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip && \
+    "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --index-url "${TORCH_CPU_INDEX_URL}" "torch==${TORCH_CPU_VERSION}" && \
     "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir -r /app/requirements.txt && \
     "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir -r /app/src/training/model_eval/requirements.txt && \
     chmod +x /app/entrypoint.sh /app/start-dashboard.sh

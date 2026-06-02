@@ -22,16 +22,20 @@ const (
 	// when router-derived session IDs are insufficient.
 	XSessionID = "x-session-id"
 
+	// XClaudeCodeSessionID is the per-conversation UUID the Claude Code CLI
+	// emits on every /v1/messages request belonging to the same chat thread.
+	// The router mirrors this into RequestContext.SessionID with priority
+	// below x-session-id (operator/SDK override) but above metadata.user_id
+	// and the message-fingerprint fallbacks. See docs/sessions.md for the
+	// full priority order.
+	XClaudeCodeSessionID = "x-claude-code-session-id"
+
 	// DisableRouterMemory allows clients to opt-out of router-managed memory injection.
 	// This prevents "silent double injection" when applications use SDK-managed memory
 	// systems like Mem0, LangMem, LangGraph, or OpenClaw.
 	// Value: "true" to disable router memory, any other value or absence enables it.
 	// Example use case: App with Mem0 sends this header to prevent duplicate memory injection.
 	DisableRouterMemory = "x-disable-router-memory"
-
-	// GatewayDestinationEndpoint specifies the backend endpoint address selected by the router.
-	// This header is set by the router to direct Envoy to the appropriate upstream service.
-	GatewayDestinationEndpoint = "x-vsr-destination-endpoint"
 
 	// SelectedModel indicates the model that was selected by the router for processing.
 	// This header is set during the routing decision phase.
@@ -73,6 +77,10 @@ const (
 	// VSRSelectedModel indicates the model selected by VSR for processing the request.
 	// Example values: "deepseek-v31", "phi4", "gpt-4"
 	VSRSelectedModel = "x-vsr-selected-model"
+
+	// VSRSessionPhase indicates the session-aware routing phase used by ACR.
+	// Example values: "user_turn", "tool_loop", "provider_state"
+	VSRSessionPhase = "x-vsr-session-phase"
 
 	// VSRInjectedSystemPrompt indicates whether a system prompt was injected into the request.
 	// Values: "true" or "false"
@@ -183,6 +191,28 @@ const (
 	// without hitting an upstream model.
 	// Value: "true"
 	VSRFastResponse = "x-vsr-fast-response"
+)
+
+// VSR Protocol Markers and Translation Warnings
+// These headers are emitted on every non-cache-hit response (including 4xx
+// and 5xx) so clients can always tell which translation cell handled the
+// call and what was lost during translation.
+const (
+	// VSRInboundProtocol describes the wire format of the inbound request
+	// as seen by the router (e.g. "openai", "anthropic"). Defaults to
+	// "openai" when no other protocol was detected.
+	VSRInboundProtocol = "x-vsr-inbound-protocol"
+
+	// VSROutboundProtocol describes the wire format of the outbound
+	// request sent to the upstream backend. Defaults to "openai" when no
+	// explicit APIFormat was resolved.
+	VSROutboundProtocol = "x-vsr-outbound-protocol"
+
+	// VSRLossinessWarnings carries a structured, comma-separated list
+	// of translation observations emitted by the inbound parser during
+	// a lossy translation. Each entry is "severity;reason;field".
+	// Absent when no warnings were produced.
+	VSRLossinessWarnings = "x-vsr-lossiness-warnings"
 )
 
 // Legacy Security Headers (kept for backward compatibility with replay recorder)

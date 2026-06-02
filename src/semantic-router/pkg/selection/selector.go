@@ -88,6 +88,15 @@ const (
 	// MethodLatencyAware uses TPOT/TTFT percentile data for latency-aware model selection
 	// Selects the fastest model from candidates based on configured latency percentiles
 	MethodLatencyAware SelectionMethod = "latency_aware"
+
+	// MethodMultiFactor combines quality/latency/cost/load signals via a
+	// weighted score with optional SLO ceilings. Issue #37.
+	MethodMultiFactor SelectionMethod = "multi_factor"
+
+	// MethodSessionAware wraps a base selector with agentic session policy:
+	// it keeps tool loops and hot multi-turn continuations on the current model
+	// unless the switch benefit clears the explicit handoff and prefix-cache cost.
+	MethodSessionAware SelectionMethod = "session_aware"
 )
 
 // AlgorithmTier classifies algorithms by production readiness
@@ -176,6 +185,11 @@ type SelectionContext struct {
 	// Used to track within-session model performance
 	SessionID string
 
+	// AgenticSession carries request-time session facts used by
+	// session_aware selection. The flat SessionID remains the shared
+	// correlation key for selectors that do not need richer session facts.
+	AgenticSession *AgenticSessionContext
+
 	// LatencyAwareTPOTPercentile is the configured TPOT percentile (1-100) for latency_aware selection
 	LatencyAwareTPOTPercentile int
 
@@ -211,6 +225,10 @@ type SelectionResult struct {
 
 	// AllScores maps each candidate model to its computed score
 	AllScores map[string]float64
+
+	// SessionPolicy records the session-aware stay/switch policy trace when
+	// Method is session_aware.
+	SessionPolicy *SessionPolicyTrace
 }
 
 // Selector is the interface for model selection algorithms
@@ -305,13 +323,17 @@ var GlobalRegistry = NewRegistry()
 
 // Select uses the specified method to select a model
 func Select(ctx context.Context, method SelectionMethod, selCtx *SelectionContext) (*SelectionResult, error) {
+	if err := ValidateSelectionContext(selCtx); err != nil {
+		return nil, err
+	}
+
 	selector, ok := GlobalRegistry.Get(method)
 	if !ok {
-		// Fall back to static selection
+		// Default to static selection when the requested method is not registered.
 		selector, _ = GlobalRegistry.Get(MethodStatic)
 	}
 	if selector == nil {
-		// Ultimate fallback: return first candidate
+		// Last-resort default: return the first configured candidate.
 		return &SelectionResult{
 			SelectedModel: selCtx.CandidateModels[0].Model,
 			LoRAName:      selCtx.CandidateModels[0].LoRAName,
@@ -324,6 +346,9 @@ func Select(ctx context.Context, method SelectionMethod, selCtx *SelectionContex
 	}
 	result, err := selector.Select(ctx, selCtx)
 	if err != nil {
+		return nil, err
+	}
+	if err := ValidateSelectionResult(selCtx, result); err != nil {
 		return nil, err
 	}
 	result.Tier = selector.Tier()

@@ -6,13 +6,17 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type contextKey string
 
-const authContextKey contextKey = "dashboardAuthContext"
+const (
+	authContextKey contextKey = "dashboardAuthContext"
 
-const authSessionCookieName = "vsr_session"
+	authSessionCookieName = "vsr_session"
+	maxAccessTokenBytes   = 8192
+)
 
 // AuthContext contains authenticated user metadata.
 type AuthContext struct {
@@ -61,6 +65,28 @@ func AuthenticateRequest(service *Service) func(http.Handler) http.Handler {
 				Perms:  perms,
 			})
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// ServiceUnavailableGuard returns middleware that fails closed when the auth
+// service could not be initialized. It rejects every request to a route that
+// normally requires authentication with 503 Service Unavailable, while still
+// allowing public routes (login/bootstrap endpoints, setup state, embedded
+// assets, and the static frontend) through so the dashboard can render and
+// surface the "authentication service is not configured" state.
+//
+// This is the deny-by-default counterpart to AuthenticateRequest: it shares
+// the same requiresAuthentication policy so the set of protected routes cannot
+// drift between the two paths.
+func ServiceUnavailableGuard() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if requiresAuthentication(r.URL.Path) {
+				http.Error(w, "Authentication service is not configured", http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -310,7 +336,7 @@ func extractBearer(raw string) string {
 	if !strings.EqualFold(parts[0], "bearer") {
 		return ""
 	}
-	return parts[1]
+	return normalizeAccessToken(parts[1])
 }
 
 func extractAccessToken(r *http.Request) string {
@@ -319,12 +345,25 @@ func extractAccessToken(r *http.Request) string {
 	}
 
 	if cookie, err := r.Cookie(authSessionCookieName); err == nil {
-		if token := strings.TrimSpace(cookie.Value); token != "" {
+		if token := normalizeAccessToken(cookie.Value); token != "" {
 			return token
 		}
 	}
 
-	return strings.TrimSpace(r.URL.Query().Get("authToken"))
+	return normalizeAccessToken(r.URL.Query().Get("authToken"))
+}
+
+func normalizeAccessToken(raw string) string {
+	token := strings.TrimSpace(raw)
+	if token == "" || len(token) > maxAccessTokenBytes {
+		return ""
+	}
+	for _, r := range token {
+		if r == ';' || unicode.IsControl(r) || unicode.IsSpace(r) {
+			return ""
+		}
+	}
+	return token
 }
 
 func requiresAuthentication(path string) bool {
@@ -332,6 +371,8 @@ func requiresAuthentication(path string) bool {
 
 	switch {
 	case strings.HasPrefix(path, "/api/auth/login"):
+		return false
+	case strings.HasPrefix(path, "/api/auth/logout"):
 		return false
 	case strings.HasPrefix(path, "/api/auth/bootstrap/"):
 		return false

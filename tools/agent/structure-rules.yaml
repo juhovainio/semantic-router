@@ -43,8 +43,9 @@ ignore_globs:
   - '**/*.pb.go'
   - '**/zz_generated*'
   - '**/node_modules/**'
+  - candle-binding/src/ffi/embedding.rs
 
-legacy_hotspots:
+structure_exceptions:
   - paths:
       - src/semantic-router/pkg/config/config.go
       - src/semantic-router/pkg/config/rag_plugin.go
@@ -73,10 +74,7 @@ legacy_hotspots:
       - src/vllm-sr/cli/models.py
     file_checks: relaxed
   - paths:
-      - deploy/operator/controllers/semanticrouter_controller.go
       - src/semantic-router/pkg/config/config_test.go
-      - src/semantic-router/pkg/dsl/compiler.go
-      - src/semantic-router/pkg/dsl/decompiler.go
       - src/semantic-router/pkg/dsl/dsl_test.go
     file_checks: relaxed
     function_checks: relaxed
@@ -119,6 +117,7 @@ legacy_hotspots:
     file_checks: relaxed
     function_checks: relaxed
   - paths:
+      - candle-binding/src/model_architectures/embedding/mmbert_embedding.rs
       - candle-binding/src/model_architectures/traditional/modernbert.rs
       - candle-binding/src/model_architectures/traditional/modernbert_test.rs
       - onnx-binding/src/model_architectures/classification/mmbert_classifier.rs
@@ -176,10 +175,7 @@ legacy_hotspots:
     file_checks: relaxed
     function_checks: relaxed
   - paths:
-      - src/semantic-router/pkg/memory/milvus_store.go
       - src/semantic-router/pkg/vectorstore/milvus_backend.go
-    file_checks: relaxed
-    function_checks: relaxed
   - paths:
       - src/semantic-router/pkg/classification/hallucination_detector.go
       - src/semantic-router/pkg/classification/mcp_classifier.go

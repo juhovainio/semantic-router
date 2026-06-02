@@ -132,6 +132,13 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
   # -- Target memory utilization percentage
   # targetMemoryUtilizationPercentage: 80
+
+safetyGuards:
+  # -- Reject multi-replica router deployments when config uses local learning
+  # selector state (elo, rl_driven, or gmtrouter). Disable only when selector
+  # learning state is intentionally externalized or the algorithm is used in a
+  # read-only/non-learning mode.
+  rejectMultiReplicaLocalSelectorState: true
 # Node selector
 nodeSelector: {}
 # Tolerations
@@ -203,7 +210,7 @@ readinessProbe:
 persistence:
   # -- Enable persistent volume
   enabled: true
-  # -- Storage class name (use "-" for default storage class)
+  # -- Storage class name. Leave empty for the cluster default; use "-" to render storageClassName: "".
   storageClassName: "standard"
   # -- Access mode
   accessMode: ReadWriteOnce
@@ -508,6 +515,9 @@ extraEnv: []
 dashboard:
   # -- Enable the vLLM-SR dashboard
   enabled: false
+  # -- Dashboard replica count. Must stay 1 until the dashboard auth/session store
+  # supports a shared multi-replica backend.
+  replicaCount: 1
   image:
     # -- Dashboard image repository
     repository: ghcr.io/vllm-project/semantic-router/dashboard
@@ -531,6 +541,22 @@ dashboard:
     requests:
       memory: "128Mi"
       cpu: "100m"
+  persistence:
+    # -- Persist dashboard-local SQLite state for auth/session/workflow data.
+    # This is restart-safe for one dashboard replica, not a shared HA session store.
+    enabled: false
+    # -- Existing PVC to mount for dashboard-local state.
+    existingClaim: ""
+    # -- Storage class name. Leave empty for the cluster default; use "-" to render storageClassName: "".
+    storageClassName: ""
+    # -- Access mode for the dashboard-local state PVC.
+    accessMode: ReadWriteOnce
+    # -- Requested dashboard-local state size.
+    size: 1Gi
+    # -- Container mount path for dashboard-local state.
+    mountPath: /app/data
+    # -- Annotations for the dashboard-local state PVC.
+    annotations: {}
 
 dependencies:
   semanticCache:
@@ -3886,21 +3912,21 @@ resources:
   requests:
     memory: 6Gi
     cpu: '1'
-  observability:
-    tracing:
-      enabled: false
-      provider: opentelemetry
-      exporter:
-        type: otlp
-        endpoint: jaeger:4317
-        insecure: true
-      sampling:
-        type: always_on
-        rate: 1.0
-      resource:
-        service_name: vllm-semantic-router
-        service_version: v0.1.0
-        deployment_environment: development
+observability:
+  tracing:
+    enabled: false
+    provider: opentelemetry
+    exporter:
+      type: otlp
+      endpoint: jaeger:4317
+      insecure: true
+    sampling:
+      type: always_on
+      rate: 1.0
+    resource:
+      service_name: vllm-semantic-router
+      service_version: v0.1.0
+      deployment_environment: development
 ---
 # Profile revision 2025-11-21: math -> phi4-mini; cs/default -> llama3-8b; removed global HTTPRoute catch-all.
 config:
@@ -9304,21 +9330,21 @@ resources:
   requests:
     memory: 6Gi
     cpu: '1'
-  observability:
-    tracing:
-      enabled: false
-      provider: opentelemetry
-      exporter:
-        type: otlp
-        endpoint: jaeger:4317
-        insecure: true
-      sampling:
-        type: always_on
-        rate: 1.0
-      resource:
-        service_name: vllm-semantic-router
-        service_version: v0.1.0
-        deployment_environment: development
+observability:
+  tracing:
+    enabled: false
+    provider: opentelemetry
+    exporter:
+      type: otlp
+      endpoint: jaeger:4317
+      insecure: true
+    sampling:
+      type: always_on
+      rate: 1.0
+    resource:
+      service_name: vllm-semantic-router
+      service_version: v0.1.0
+      deployment_environment: development
 ---
 # Profile revision 2025-11-21: math -> phi4-mini; cs/default -> llama3-8b; removed global HTTPRoute catch-all.
 config:

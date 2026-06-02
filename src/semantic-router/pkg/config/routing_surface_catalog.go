@@ -35,8 +35,7 @@ var supportedSignalTypes = []string{
 	SignalTypeStructure,
 	SignalTypeKB,
 	SignalTypeUserFeedback,
-	SignalTypeSessionMetric,
-	SignalTypeEventContext,
+	SignalTypeEvent,
 }
 
 var supportedDecisionPluginTypes = []string{
@@ -71,10 +70,12 @@ var decisionAlgorithmCatalog = []AlgorithmCatalogEntry{
 	{Type: "knn", Tier: "experimental"},
 	{Type: "latency_aware", Tier: "supported"},
 	{Type: "mlp", Tier: "experimental"},
+	{Type: "multi_factor", Tier: "supported"},
 	{Type: "ratings", Tier: "supported"},
 	{Type: "remom", Tier: "supported"},
 	{Type: "rl_driven", Tier: "experimental"},
 	{Type: "router_dc", Tier: "supported"},
+	{Type: "session_aware", Tier: "supported"},
 	{Type: "static", Tier: "supported"},
 	{Type: "svm", Tier: "experimental"},
 }

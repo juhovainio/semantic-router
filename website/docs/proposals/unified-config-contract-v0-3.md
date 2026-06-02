@@ -66,7 +66,7 @@ DSL now owns only:
 - `routing.modelCards`
 - `routing.signals`
 - `routing.projections` for signal coordination and derived routing outputs
-- `routing.decisions`, including bounded candidate-iteration metadata used by DSL `FOR ... IN` authoring
+- `routing.decisions`, including route-local `algorithm`, plugin references, emitted directives, and bounded candidate-iteration metadata used by DSL `FOR ... IN` authoring
 
 It no longer owns endpoints, API keys, listeners, or router-global runtime settings.
 
@@ -91,12 +91,14 @@ Router-global defaults are now owned by the router itself, not by a second user-
 - `global:` only overrides what you need to change
 - `global.router` groups router-engine control knobs, including `config_source`
 - `global.router.model_selection.model_switch_gate` is the optional shadow/enforce policy seam for auditing session-aware model stay-vs-switch decisions
+- `session_aware` selection can consume replay-derived `remaining_turn_prior` lookup-table entries, hard-lock non-portable provider-state continuations, reset continuity on decision drift, price prefix-cache loss by input checkout cost, and expose those facts in `session_policy` traces for experiments. Its cache-cost multiplier is constrained to neutral-or-stricter values and its remaining-turn prior horizon must be positive.
 - `global.services` groups shared APIs and runtime services
 - `global.services.router_replay.enabled` provides the router-wide replay default, while route-local `router_replay.enabled: false` is the explicit opt-out
 - `global.stores` groups storage-backed services
 - `global.integrations` groups helper runtime integrations
 - `global.model_catalog` groups router-owned model assets under `embeddings`, `system`, `external`, `classifiers`, `kbs`, and `modules`, including embedding fallback knobs such as `embedding_config.top_k`, shared prototype-aware scoring controls such as `prototype_scoring`, and built-in knowledge-base source paths such as `knowledge_bases/privacy/`
 - `global.model_catalog.modules` is the home for router-owned module settings such as `prompt_compression`, `prompt_guard`, `classifier`, `complexity`, `hallucination_mitigation`, `feedback_detector`, and `modality_detector`
+- `global.model_catalog.modules.prompt_compression.profile` keeps prompt-compression presets in the signal-evaluation layer as a validated enum (`default`, `coding`, `medical`, `security`, `multi_turn`, with `multi-turn` accepted as an alias). It does not rewrite the upstream model request body; post-decision request mutation belongs under decision/plugin surfaces.
 - omitted fields keep the built-in default
 
 This makes local, dashboard, Helm, and operator behavior converge on the same baseline.

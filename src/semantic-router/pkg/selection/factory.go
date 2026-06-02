@@ -55,6 +55,13 @@ type ModelSelectionConfig struct {
 	// GMTRouter configuration (used when method is "gmtrouter")
 	// Implements heterogeneous graph learning for personalized routing
 	GMTRouter *GMTRouterConfig `yaml:"gmtrouter,omitempty"`
+
+	// MultiFactor configuration (used when method is "multi_factor")
+	// Implements weighted quality/latency/cost/load composition. Issue #37.
+	MultiFactor *MultiFactorConfig `yaml:"multi_factor,omitempty"`
+
+	// SessionAware configuration (used when method is "session_aware")
+	SessionAware *SessionAwareConfig `yaml:"session_aware,omitempty"`
 }
 
 // DefaultModelSelectionConfig returns the default configuration
@@ -174,6 +181,24 @@ func (f *Factory) Create() Selector {
 
 	case MethodLatencyAware:
 		selector = NewLatencyAwareSelector(nil)
+
+	case MethodMultiFactor:
+		multiFactorSelector := NewMultiFactorSelector(f.cfg.MultiFactor)
+		if f.modelConfig != nil {
+			multiFactorSelector.InitializeFromConfig(f.modelConfig)
+		}
+		selector = multiFactorSelector
+
+	case MethodSessionAware:
+		sessionAwareSelector := NewSessionAwareSelector(f.cfg.SessionAware)
+		if f.modelConfig != nil {
+			sessionAwareSelector.InitializeFromConfig(f.modelConfig)
+		}
+		if f.lookupTable != nil {
+			sessionAwareSelector.SetLookupTable(f.lookupTable)
+		}
+		sessionAwareSelector.SetBaseSelector(f.createSessionAwareBaseSelector(sessionAwareSelector.config.BaseMethod))
+		selector = sessionAwareSelector
 
 	default:
 		// Default to static selector
@@ -322,11 +347,47 @@ func (f *Factory) CreateAll() *Registry {
 	latencyAwareSelector := NewLatencyAwareSelector(nil)
 	registry.Register(MethodLatencyAware, latencyAwareSelector)
 
+	// Create MultiFactor selector
+	multiFactorSelector := NewMultiFactorSelector(f.cfg.MultiFactor)
+	if f.modelConfig != nil {
+		multiFactorSelector.InitializeFromConfig(f.modelConfig)
+	}
+	registry.Register(MethodMultiFactor, multiFactorSelector)
+
+	// Create SessionAware selector after base selectors so it can wrap one.
+	sessionAwareSelector := NewSessionAwareSelector(f.cfg.SessionAware)
+	if f.modelConfig != nil {
+		sessionAwareSelector.InitializeFromConfig(f.modelConfig)
+	}
+	if f.lookupTable != nil {
+		sessionAwareSelector.SetLookupTable(f.lookupTable)
+	}
+	if baseSelector, ok := registry.Get(sessionAwareSelector.config.BaseMethod); ok {
+		sessionAwareSelector.SetBaseSelector(baseSelector)
+	} else if baseSelector, ok := registry.Get(MethodStatic); ok {
+		sessionAwareSelector.SetBaseSelector(baseSelector)
+	}
+	registry.Register(MethodSessionAware, sessionAwareSelector)
+
 	LogRegisteredAlgorithms(registry)
 	logging.ComponentEvent("selection", "selection_factory_initialized", map[string]interface{}{
 		"selector_count": len(registry.selectors),
 	})
 	return registry
+}
+
+func (f *Factory) createSessionAwareBaseSelector(method SelectionMethod) Selector {
+	if method == "" || method == MethodSessionAware {
+		method = MethodHybrid
+	}
+	cfg := *f.cfg
+	cfg.Method = string(method)
+	return NewFactory(&cfg).
+		WithModelConfig(f.modelConfig).
+		WithCategories(f.categories).
+		WithEmbeddingFunc(f.embeddingFunc).
+		WithLookupTable(f.lookupTable).
+		Create()
 }
 
 // LogRegisteredAlgorithms logs the tier and dependencies of each registered algorithm

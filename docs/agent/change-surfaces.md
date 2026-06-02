@@ -113,14 +113,14 @@ This document defines the project-level surfaces used by skills, reports, and va
 ## `deployment_profile_stack`
 
 - Kubernetes deployment profiles, stack manifests, and profile-owned platform resources outside operator CRDs.
-- Typical paths: `deploy/kubernetes/response-api/**`, `deploy/kubernetes/ai-gateway/**`, `deploy/kubernetes/observability/**`, `deploy/kubernetes/streaming/**`
-- Task rules: `e2e-framework`
+- Typical paths: `deploy/helm/**`, `deploy/kubernetes/response-api/**`, `deploy/kubernetes/ai-gateway/**`, `deploy/kubernetes/observability/**`, `deploy/kubernetes/streaming/**`
+- Task rules: `helm-chart`, `e2e-framework`
 
 ## `k8s_platform`
 
 - Kubernetes-facing operator, CRD, deployment-profile, and DSL translation surfaces for semantic-router platform integration.
-- Typical paths: `deploy/operator/**`, `deploy/kubernetes/**`, `src/semantic-router/pkg/apis/**`, `src/semantic-router/pkg/dsl/**`, `src/semantic-router/pkg/k8s/**`
-- Task rules: `operator-stack`, `e2e-framework`
+- Typical paths: `deploy/helm/**`, `deploy/operator/**`, `deploy/kubernetes/**`, `src/semantic-router/pkg/apis/**`, `src/semantic-router/pkg/dsl/**`, `src/semantic-router/pkg/k8s/**`
+- Task rules: `helm-chart`, `operator-stack`, `e2e-framework`
 
 ## `fleet_sim_runtime`
 
@@ -142,7 +142,7 @@ This document defines the project-level surfaces used by skills, reports, and va
 
 ## `harness_docs`
 
-- Shared agent entry, indexed harness docs, local `AGENTS.md` supplements, skill prose, ADRs, execution plans, glossary, and debt tracking for the harness itself.
+- Shared agent entry, indexed harness docs, local `AGENTS.md` supplements, skill prose, execution plans, glossary, and debt tracking for the harness itself.
 - Typical paths: `AGENTS.md`, `docs/agent/**`, `tools/agent/skills/**`, indexed local `AGENTS.md` files under hotspot directories
 - Task rules: `agent_text`, `repo-docs`
 
@@ -157,6 +157,12 @@ This document defines the project-level surfaces used by skills, reports, and va
 - Contributor-facing wrappers around the harness such as README, contributing guidance, PR or issue intake templates, and maintainer label taxonomy.
 - Typical paths: `README.md`, `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/**`, `.prowlabels.yaml`
 - Task rules: `repo-docs`, `agent_text`
+
+## `maintainer_ops`
+
+- Maintainer-only release, milestone, issue, PR, stale-work, and daily board workflows.
+- Typical paths: `docs/agent/maintainer-ops.md`, `tools/agent/maintainer-policy.yaml`, `tools/agent/scripts/maintainer_board.py`, `.prowlabels.yaml`
+- Task rules: `agent_text`, `agent_exec`, `repo-docs`
 
 ## `local_smoke`
 
@@ -173,7 +179,7 @@ This document defines the project-level surfaces used by skills, reports, and va
 ## `cli_install`
 
 - Session-isolated CLI install wrapper and coding-agent skill for quick, disposable vllm-sr installs.
-- Typical paths: `install.sh`, `tools/agent/scripts/cc-install.sh`, `tools/agent/skills/claude-code-install/**`
+- Typical paths: `install.sh`, `tools/agent/scripts/cc-install.sh`
 - Task rules: `vllm-sr-cli`
 
 ## `ci_e2e`

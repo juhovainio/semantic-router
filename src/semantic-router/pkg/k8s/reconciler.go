@@ -18,7 +18,9 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -164,17 +166,32 @@ func (r *Reconciler) watchLoop(ctx context.Context) {
 
 // reconcile performs the reconciliation logic
 func (r *Reconciler) reconcile(ctx context.Context) error {
-	// Get IntelligentPool
-	pool, err := r.getIntelligentPool(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get IntelligentPool: %w", err)
+	// The reconciler emits a single canonical config and so expects exactly
+	// one pool and one route. When several coexist, short-circuiting would
+	// leave every CR with an empty status indefinitely (#1908); instead mark
+	// each conflicting CR Ready=False so the conflict is observable.
+	poolList := &v1alpha1.IntelligentPoolList{}
+	if err := r.client.List(ctx, poolList, client.InNamespace(r.namespace)); err != nil {
+		return fmt.Errorf("failed to list IntelligentPools: %w", err)
+	}
+	routeList := &v1alpha1.IntelligentRouteList{}
+	if err := r.client.List(ctx, routeList, client.InNamespace(r.namespace)); err != nil {
+		return fmt.Errorf("failed to list IntelligentRoutes: %w", err)
 	}
 
-	// Get IntelligentRoute
-	route, err := r.getIntelligentRoute(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get IntelligentRoute: %w", err)
+	if len(poolList.Items) == 0 {
+		return fmt.Errorf("no IntelligentPool found in namespace %s", r.namespace)
 	}
+	if len(routeList.Items) == 0 {
+		return fmt.Errorf("no IntelligentRoute found in namespace %s", r.namespace)
+	}
+
+	if len(poolList.Items) > 1 || len(routeList.Items) > 1 {
+		return r.reportConflict(ctx, poolList.Items, routeList.Items)
+	}
+
+	pool := &poolList.Items[0]
+	route := &routeList.Items[0]
 
 	// Check if anything changed
 	r.mu.RLock()
@@ -202,38 +219,29 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	return nil
 }
 
-// getIntelligentPool retrieves the IntelligentPool from the namespace
-func (r *Reconciler) getIntelligentPool(ctx context.Context) (*v1alpha1.IntelligentPool, error) {
-	poolList := &v1alpha1.IntelligentPoolList{}
-	if err := r.client.List(ctx, poolList, client.InNamespace(r.namespace)); err != nil {
-		return nil, fmt.Errorf("failed to list IntelligentPools: %w", err)
+// reportConflict marks every IntelligentPool and IntelligentRoute in the
+// namespace Ready=False/Reason=Conflict and returns an error so the watch
+// loop logs the condition without silently dropping all CRs' status.
+func (r *Reconciler) reportConflict(ctx context.Context, pools []v1alpha1.IntelligentPool, routes []v1alpha1.IntelligentRoute) error {
+	var msgs []string
+
+	if len(pools) > 1 {
+		msg := fmt.Sprintf("found %d IntelligentPools in namespace %s, expected exactly 1; resolve the conflict so a single configuration can be applied", len(pools), r.namespace)
+		msgs = append(msgs, msg)
+		for i := range pools {
+			r.updatePoolStatus(ctx, &pools[i], metav1.ConditionFalse, "Conflict", msg)
+		}
 	}
 
-	if len(poolList.Items) == 0 {
-		return nil, fmt.Errorf("no IntelligentPool found in namespace %s", r.namespace)
-	}
-	if len(poolList.Items) > 1 {
-		return nil, fmt.Errorf("multiple IntelligentPools found in namespace %s, expected exactly 1", r.namespace)
-	}
-
-	return &poolList.Items[0], nil
-}
-
-// getIntelligentRoute retrieves the IntelligentRoute from the namespace
-func (r *Reconciler) getIntelligentRoute(ctx context.Context) (*v1alpha1.IntelligentRoute, error) {
-	routeList := &v1alpha1.IntelligentRouteList{}
-	if err := r.client.List(ctx, routeList, client.InNamespace(r.namespace)); err != nil {
-		return nil, fmt.Errorf("failed to list IntelligentRoutes: %w", err)
+	if len(routes) > 1 {
+		msg := fmt.Sprintf("found %d IntelligentRoutes in namespace %s, expected exactly 1; resolve the conflict so a single configuration can be applied", len(routes), r.namespace)
+		msgs = append(msgs, msg)
+		for i := range routes {
+			r.updateRouteStatus(ctx, &routes[i], metav1.ConditionFalse, "Conflict", msg)
+		}
 	}
 
-	if len(routeList.Items) == 0 {
-		return nil, fmt.Errorf("no IntelligentRoute found in namespace %s", r.namespace)
-	}
-	if len(routeList.Items) > 1 {
-		return nil, fmt.Errorf("multiple IntelligentRoutes found in namespace %s, expected exactly 1", r.namespace)
-	}
-
-	return &routeList.Items[0], nil
+	return errors.New(strings.Join(msgs, "; "))
 }
 
 // validateAndUpdate validates CRDs and updates configuration
@@ -263,17 +271,14 @@ func (r *Reconciler) validateAndUpdate(ctx context.Context, pool *v1alpha1.Intel
 	}
 	newConfig.ConfigSource = config.ConfigSourceKubernetes
 
-	// When staticConfig.ConfigSource is ConfigSourceKubernetes (the
-	// operator-mode default), the canonical bytes inherit that value
-	// and ParseYAMLBytes's call to validateConfigStructure early-returns
-	// before the per-family validators fire. Apply the embedding contract
-	// directly here so the K8s path holds CRDs to the same contract
-	// file-config holds files to. See td-040 for the broader gap this
-	// slice closes.
-	if err := config.ValidateEmbeddingContracts(newConfig); err != nil {
+	// The initial Kubernetes static-config parse is intentionally tolerant
+	// because routing state comes from CRDs. Once pool and route have been
+	// converted, run the shared K8s-safe validator dispatch so reconcile holds
+	// CRD-loaded config to the same family contracts as file-loaded config.
+	if err := config.ValidateKubernetesConfigContracts(newConfig); err != nil {
 		r.updatePoolStatus(ctx, pool, metav1.ConditionFalse, "ValidationFailed", err.Error())
 		r.updateRouteStatus(ctx, route, metav1.ConditionFalse, "ValidationFailed", err.Error())
-		return fmt.Errorf("embedding modality validation failed: %w", err)
+		return fmt.Errorf("kubernetes config validation failed: %w", err)
 	}
 
 	// Call update callback

@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -1177,7 +1178,7 @@ func init() {
 	// Any package-level initialization can go here
 }
 
-var _ = Describe("Endpoint Selection", func() {
+var _ = Describe("Model Routing Header Contract", func() {
 	var (
 		router *OpenAIRouter
 		cfg    *config.RouterConfig
@@ -1192,11 +1193,47 @@ var _ = Describe("Endpoint Selection", func() {
 		}
 	})
 
-	Describe("Model Routing with Endpoint Selection", func() {
+	headerValues := func(response *ext_proc.ProcessingResponse) map[string]string {
+		requestBodyResponse := response.GetRequestBody()
+		Expect(requestBodyResponse).NotTo(BeNil())
+		headerMutation := requestBodyResponse.GetResponse().GetHeaderMutation()
+		values := map[string]string{}
+		if headerMutation == nil {
+			return values
+		}
+		for _, header := range headerMutation.SetHeaders {
+			value := header.Header.Value
+			if value == "" && len(header.Header.RawValue) > 0 {
+				value = string(header.Header.RawValue)
+			}
+			values[header.Header.Key] = value
+		}
+		return values
+	}
+
+	processBody := func(body map[string]interface{}) *ext_proc.ProcessingResponse {
+		requestBody, err := json.Marshal(body)
+		Expect(err).NotTo(HaveOccurred())
+
+		processingRequest := &ext_proc.ProcessingRequest{
+			Request: &ext_proc.ProcessingRequest_RequestBody{
+				RequestBody: &ext_proc.HttpBody{
+					Body: requestBody,
+				},
+			},
+		}
+		stream := NewMockStream([]*ext_proc.ProcessingRequest{processingRequest})
+
+		err = router.Process(stream)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stream.Responses).To(HaveLen(1))
+		return stream.Responses[0]
+	}
+
+	Describe("Model Routing", func() {
 		Context("when model is 'auto'", func() {
-			It("should select appropriate endpoint for automatically selected model", func() {
-				// Create a request with model "auto"
-				openAIRequest := map[string]interface{}{
+			It("should emit the selected-model signal without an endpoint destination header", func() {
+				response := processBody(map[string]interface{}{
 					"model": "auto",
 					"messages": []map[string]interface{}{
 						{
@@ -1204,74 +1241,17 @@ var _ = Describe("Endpoint Selection", func() {
 							"content": "Write a Python function to sort a list",
 						},
 					},
-				}
+				})
 
-				requestBody, err := json.Marshal(openAIRequest)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Create processing request
-				processingRequest := &ext_proc.ProcessingRequest{
-					Request: &ext_proc.ProcessingRequest_RequestBody{
-						RequestBody: &ext_proc.HttpBody{
-							Body: requestBody,
-						},
-					},
-				}
-
-				// Create mock stream
-				stream := NewMockStream([]*ext_proc.ProcessingRequest{processingRequest})
-
-				// Process the request
-				err = router.Process(stream)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Verify response was sent
-				Expect(stream.Responses).To(HaveLen(1))
-				response := stream.Responses[0]
-
-				// Check if headers were set for endpoint selection
-				requestBodyResponse := response.GetRequestBody()
-				Expect(requestBodyResponse).NotTo(BeNil())
-
-				headerMutation := requestBodyResponse.GetResponse().GetHeaderMutation()
-				if headerMutation != nil && len(headerMutation.SetHeaders) > 0 {
-					// Verify that endpoint selection header is present
-					var endpointHeaderFound bool
-					var modelHeaderFound bool
-
-					for _, header := range headerMutation.SetHeaders {
-						if header.Header.Key == "x-vsr-destination-endpoint" {
-							endpointHeaderFound = true
-							// Should be one of the configured endpoint addresses
-							// Check both Value and RawValue since implementation uses RawValue
-							headerValue := header.Header.Value
-							if headerValue == "" && len(header.Header.RawValue) > 0 {
-								headerValue = string(header.Header.RawValue)
-							}
-							Expect(headerValue).To(BeElementOf("127.0.0.1:8000", "127.0.0.1:8001"))
-						}
-						if header.Header.Key == "x-selected-model" {
-							modelHeaderFound = true
-							// Should be one of the configured models
-							// Check both Value and RawValue since implementation may use either
-							headerValue := header.Header.Value
-							if headerValue == "" && len(header.Header.RawValue) > 0 {
-								headerValue = string(header.Header.RawValue)
-							}
-							Expect(headerValue).To(BeElementOf("model-a", "model-b"))
-						}
-					}
-
-					// At least one of these should be true (endpoint header should be set when model routing occurs)
-					Expect(endpointHeaderFound || modelHeaderFound).To(BeTrue())
-				}
+				values := headerValues(response)
+				Expect(values).To(HaveKeyWithValue("x-selected-model", BeElementOf("model-a", "model-b")))
+				Expect(values).NotTo(HaveKey("x-vsr-destination-endpoint"))
 			})
 		})
 
 		Context("when model is explicitly specified", func() {
-			It("should select appropriate endpoint for specified model", func() {
-				// Create a request with explicit model
-				openAIRequest := map[string]interface{}{
+			It("should route by selected-model only", func() {
+				response := processBody(map[string]interface{}{
 					"model": "model-a",
 					"messages": []map[string]interface{}{
 						{
@@ -1279,62 +1259,15 @@ var _ = Describe("Endpoint Selection", func() {
 							"content": "Hello, world!",
 						},
 					},
-				}
+				})
 
-				requestBody, err := json.Marshal(openAIRequest)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Create processing request
-				processingRequest := &ext_proc.ProcessingRequest{
-					Request: &ext_proc.ProcessingRequest_RequestBody{
-						RequestBody: &ext_proc.HttpBody{
-							Body: requestBody,
-						},
-					},
-				}
-
-				// Create mock stream
-				stream := NewMockStream([]*ext_proc.ProcessingRequest{processingRequest})
-
-				// Process the request
-				err = router.Process(stream)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Verify response was sent
-				Expect(stream.Responses).To(HaveLen(1))
-				response := stream.Responses[0]
-
-				// Check if headers were set for endpoint selection
-				requestBodyResponse := response.GetRequestBody()
-				Expect(requestBodyResponse).NotTo(BeNil())
-
-				headerMutation := requestBodyResponse.GetResponse().GetHeaderMutation()
-				if headerMutation != nil && len(headerMutation.SetHeaders) > 0 {
-					var endpointHeaderFound bool
-					var selectedEndpoint string
-
-					for _, header := range headerMutation.SetHeaders {
-						if header.Header.Key == "x-vsr-destination-endpoint" {
-							endpointHeaderFound = true
-							// Check both Value and RawValue since implementation uses RawValue
-							selectedEndpoint = header.Header.Value
-							if selectedEndpoint == "" && len(header.Header.RawValue) > 0 {
-								selectedEndpoint = string(header.Header.RawValue)
-							}
-							break
-						}
-					}
-
-					if endpointHeaderFound {
-						// model-a should be routed to test-endpoint1 based on preferred endpoints
-						Expect(selectedEndpoint).To(Equal("127.0.0.1:8000"))
-					}
-				}
+				values := headerValues(response)
+				Expect(values).To(HaveKeyWithValue("x-selected-model", "model-a"))
+				Expect(values).NotTo(HaveKey("x-vsr-destination-endpoint"))
 			})
 
-			It("should handle model with multiple preferred endpoints", func() {
-				// Create a request with model-b which has multiple preferred endpoints
-				openAIRequest := map[string]interface{}{
+			It("should leave endpoint load balancing to Envoy when a model has multiple backends", func() {
+				response := processBody(map[string]interface{}{
 					"model": "model-b",
 					"messages": []map[string]interface{}{
 						{
@@ -1342,57 +1275,11 @@ var _ = Describe("Endpoint Selection", func() {
 							"content": "Test message",
 						},
 					},
-				}
+				})
 
-				requestBody, err := json.Marshal(openAIRequest)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Create processing request
-				processingRequest := &ext_proc.ProcessingRequest{
-					Request: &ext_proc.ProcessingRequest_RequestBody{
-						RequestBody: &ext_proc.HttpBody{
-							Body: requestBody,
-						},
-					},
-				}
-
-				// Create mock stream
-				stream := NewMockStream([]*ext_proc.ProcessingRequest{processingRequest})
-
-				// Process the request
-				err = router.Process(stream)
-				Expect(err).NotTo(HaveOccurred())
-
-				// Verify response was sent
-				Expect(stream.Responses).To(HaveLen(1))
-				response := stream.Responses[0]
-
-				// Check if headers were set for endpoint selection
-				requestBodyResponse := response.GetRequestBody()
-				Expect(requestBodyResponse).NotTo(BeNil())
-
-				headerMutation := requestBodyResponse.GetResponse().GetHeaderMutation()
-				if headerMutation != nil && len(headerMutation.SetHeaders) > 0 {
-					var endpointHeaderFound bool
-					var selectedEndpoint string
-
-					for _, header := range headerMutation.SetHeaders {
-						if header.Header.Key == "x-vsr-destination-endpoint" {
-							endpointHeaderFound = true
-							// Check both Value and RawValue since implementation uses RawValue
-							selectedEndpoint = header.Header.Value
-							if selectedEndpoint == "" && len(header.Header.RawValue) > 0 {
-								selectedEndpoint = string(header.Header.RawValue)
-							}
-							break
-						}
-					}
-
-					if endpointHeaderFound {
-						// model-b should be routed to test-endpoint2 (higher weight) or test-endpoint1
-						Expect(selectedEndpoint).To(BeElementOf("127.0.0.1:8000", "127.0.0.1:8001"))
-					}
-				}
+				values := headerValues(response)
+				Expect(values).To(HaveKeyWithValue("x-selected-model", "model-b"))
+				Expect(values).NotTo(HaveKey("x-vsr-destination-endpoint"))
 			})
 		})
 
@@ -1455,8 +1342,8 @@ var _ = Describe("Endpoint Selection", func() {
 		})
 	})
 
-	Describe("Endpoint Configuration Validation", func() {
-		It("should have valid endpoint configuration in test config", func() {
+	Describe("Backend Configuration Validation", func() {
+		It("should have valid backend endpoint config in test config", func() {
 			Expect(cfg.VLLMEndpoints).To(HaveLen(2))
 
 			// Verify first endpoint
@@ -1479,28 +1366,15 @@ var _ = Describe("Endpoint Selection", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("should find correct endpoints for models", func() {
-			// Test model-a (should find test-endpoint1)
+		It("should find configured backend refs for models", func() {
 			endpoints := cfg.GetEndpointsForModel("model-a")
 			Expect(endpoints).To(HaveLen(1))
 			Expect(endpoints[0].Name).To(Equal("test-endpoint1"))
 
-			// Test model-b (should find both endpoints, but prefer test-endpoint2 due to weight)
 			endpoints = cfg.GetEndpointsForModel("model-b")
 			Expect(endpoints).To(HaveLen(2))
 			endpointNames := []string{endpoints[0].Name, endpoints[1].Name}
 			Expect(endpointNames).To(ContainElements("test-endpoint1", "test-endpoint2"))
-
-			// Test best endpoint selection
-			bestEndpoint, found := cfg.SelectBestEndpointForModel("model-b")
-			Expect(found).To(BeTrue())
-			Expect(bestEndpoint).To(BeElementOf("test-endpoint1", "test-endpoint2"))
-
-			// Test best endpoint address selection
-			bestEndpointAddress, found, addrErr := cfg.SelectBestEndpointAddressForModel("model-b")
-			Expect(addrErr).NotTo(HaveOccurred())
-			Expect(found).To(BeTrue())
-			Expect(bestEndpointAddress).To(BeElementOf("127.0.0.1:8000", "127.0.0.1:8001"))
 		})
 	})
 
@@ -2333,7 +2207,11 @@ func TestVSRHeadersAddedOnSuccessfulNonCachedResponse(t *testing.T) {
 	assert.NotNil(t, headerMutation, "HeaderMutation should not be nil for successful non-cached response")
 
 	setHeaders := headerMutation.GetSetHeaders()
-	assert.Len(t, setHeaders, 4, "Should have 4 VSR headers")
+	// 4 standard decision headers + x-vsr-inbound-protocol +
+	// x-vsr-outbound-protocol (translation-cell markers added by the
+	// Anthropic ingress series; emitted on every non-cache-hit response
+	// so operators can identify the cell that handled the request).
+	assert.Len(t, setHeaders, 6, "Should have 6 VSR headers")
 
 	// Verify each header
 	headerMap := make(map[string]string)
@@ -2345,6 +2223,8 @@ func TestVSRHeadersAddedOnSuccessfulNonCachedResponse(t *testing.T) {
 	assert.Equal(t, "on", headerMap["x-vsr-selected-reasoning"])
 	assert.Equal(t, "deepseek-v31", headerMap["x-vsr-selected-model"])
 	assert.Equal(t, "true", headerMap["x-vsr-injected-system-prompt"])
+	assert.Equal(t, "openai", headerMap["x-vsr-inbound-protocol"])
+	assert.Equal(t, "openai", headerMap["x-vsr-outbound-protocol"])
 }
 
 func TestVSRHeadersNotAddedOnCacheHit(t *testing.T) {
@@ -2414,9 +2294,23 @@ func TestVSRHeadersNotAddedOnErrorResponse(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, response)
 
-	// Verify VSR headers were NOT added due to error status
+	// Decision/signal headers are NOT added on error responses, but the
+	// translation-cell protocol markers (x-vsr-inbound-protocol and
+	// x-vsr-outbound-protocol) ride on every non-cache-hit response —
+	// success or error — so operators can identify which translation
+	// cell handled a failed request. See processor_res_header_mutation.go.
 	headerMutation := response.GetResponseHeaders().GetResponse().GetHeaderMutation()
-	assert.Nil(t, headerMutation, "HeaderMutation should be nil for error response")
+	require.NotNil(t, headerMutation, "HeaderMutation should carry protocol markers even on error")
+	setHeaders := headerMutation.GetSetHeaders()
+	assert.Len(t, setHeaders, 2, "Error response should have only the 2 protocol-marker headers")
+	headerMap := make(map[string]string)
+	for _, header := range setHeaders {
+		headerMap[header.Header.Key] = string(header.Header.RawValue)
+	}
+	assert.Equal(t, "openai", headerMap["x-vsr-inbound-protocol"])
+	assert.Equal(t, "openai", headerMap["x-vsr-outbound-protocol"])
+	assert.NotContains(t, headerMap, "x-vsr-selected-category", "decision headers must not appear on error")
+	assert.NotContains(t, headerMap, "x-vsr-selected-model", "decision headers must not appear on error")
 }
 
 func TestVSRHeadersPartialInformation(t *testing.T) {
@@ -2456,7 +2350,10 @@ func TestVSRHeadersPartialInformation(t *testing.T) {
 	assert.NotNil(t, headerMutation)
 
 	setHeaders := headerMutation.GetSetHeaders()
-	assert.Len(t, setHeaders, 3, "Should have 3 VSR headers (excluding empty reasoning mode, but including injected-system-prompt)")
+	// 3 standard decision headers (excluding empty reasoning mode, but
+	// including injected-system-prompt) + 2 translation-cell protocol
+	// markers (x-vsr-inbound-protocol + x-vsr-outbound-protocol).
+	assert.Len(t, setHeaders, 5, "Should have 5 VSR headers")
 
 	// Verify each header
 	headerMap := make(map[string]string)

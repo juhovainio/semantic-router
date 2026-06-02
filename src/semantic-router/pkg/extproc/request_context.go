@@ -7,6 +7,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/anthropic"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/ir"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/projectiontrace"
@@ -62,6 +63,11 @@ type RequestContext struct {
 	IsStreamingResponse     bool                   // set from response Content-Type
 	AnthropicStream         *anthropic.StreamState // Anthropic SSE → OpenAI translation state
 
+	// AnthropicPassthrough carries Anthropic-only request fields captured from
+	// the raw inbound body and incoming headers, so the request-body writer
+	// and header builder can replay them on the outbound side.
+	AnthropicPassthrough *anthropic.AnthropicPassthrough
+
 	// Semi-streaming body handler (non-nil when Envoy sends STREAMED body chunks)
 	StreamedBody *StreamedBodyHandler
 
@@ -77,11 +83,19 @@ type RequestContext struct {
 	TTFTRecorded bool
 	TTFTSeconds  float64
 
+	// InflightToken is the handle returned by inflight.Begin when this request
+	// was admitted to the in-flight tracker after model selection. Zero means
+	// the request was never admitted (rejected pre-selection, cache hit, etc.)
+	// and inflight.End on it is a no-op.
+	InflightToken uint64
+
 	// Session-aware transition metadata
 	SessionID           string  // Derived from ConversationID (Response API) or message hash (Chat Completions)
 	TurnIndex           int     // Number of prior turns in this session (0 = first turn)
 	PreviousModel       string  // Model used in the immediately preceding turn; empty on first turn
 	CacheWarmthEstimate float64 // [0,1] from EstimateCacheProbability; 0.5 = unknown
+	SessionIdleSeconds  float64 // Seconds since the last locally observed turn for this session
+	SessionIdleKnown    bool    // True when SessionIdleSeconds came from local session observation
 
 	// HistoryTokenCount is the estimated token count of conversation history,
 	// excluding the current turn. Source priority: provider usage accumulation
@@ -94,16 +108,17 @@ type RequestContext struct {
 	PreviousResponseID string
 
 	// VSR decision tracking
-	VSRSelectedCategory           string           // The category from domain classification (MMLU category)
-	VSRSelectedDecisionName       string           // The decision name from DecisionEngine evaluation
-	VSRSelectedDecisionConfidence float64          // Confidence score from DecisionEngine evaluation
-	VSRReasoningMode              string           // "on" or "off" - whether reasoning mode was determined to be used
-	VSRSelectedModel              string           // The model selected by VSR
-	VSRSelectionMethod            string           // Model selection algorithm used (e.g., "elo", "static", "router_dc")
-	VSRCacheHit                   bool             // Whether this request hit the cache
-	VSRCacheSimilarity            float32          // Similarity score from last cache lookup (0 = no lookup performed)
-	VSRInjectedSystemPrompt       bool             // Whether a system prompt was injected into the request
-	VSRSelectedDecision           *config.Decision // The decision object selected by DecisionEngine (for plugins)
+	VSRSelectedCategory           string                 // The category from domain classification (MMLU category)
+	VSRSelectedDecisionName       string                 // The decision name from DecisionEngine evaluation
+	VSRSelectedDecisionConfidence float64                // Confidence score from DecisionEngine evaluation
+	VSRReasoningMode              string                 // "on" or "off" - whether reasoning mode was determined to be used
+	VSRSelectedModel              string                 // The model selected by VSR
+	VSRSelectionMethod            string                 // Model selection algorithm used (e.g., "elo", "static", "router_dc")
+	VSRSessionPolicy              map[string]interface{} // Session-aware routing policy trace for replay/experiments
+	VSRCacheHit                   bool                   // Whether this request hit the cache
+	VSRCacheSimilarity            float32                // Similarity score from last cache lookup (0 = no lookup performed)
+	VSRInjectedSystemPrompt       bool                   // Whether a system prompt was injected into the request
+	VSRSelectedDecision           *config.Decision       // The decision object selected by DecisionEngine (for plugins)
 
 	// Modality routing classification result (AR/DIFFUSION/BOTH)
 	ModalityClassification *ModalityClassificationResult // Set by classifyModality()
@@ -119,6 +134,7 @@ type RequestContext struct {
 	VSRMatchedLanguage     []string // Matched language signals
 	VSRMatchedContext      []string // Matched context rule names (e.g. "low_token_count")
 	VSRContextTokenCount   int      // Actual token count for the request
+	VSRContextTextBytes    int      // Byte length of text used for context token estimation
 	VSRMatchedStructure    []string // Matched structure rule names
 	VSRMatchedComplexity   []string // Matched complexity rules with difficulty level (e.g. "code_complexity:hard")
 	VSRMatchedModality     []string // Matched modality signals: "AR", "DIFFUSION", or "BOTH"
@@ -127,14 +143,13 @@ type RequestContext struct {
 	VSRMatchedPII          []string // Matched PII rule names (denied PII types detected)
 	VSRMatchedKB           []string // Matched knowledge-base signal names
 	VSRMatchedConversation []string // Matched conversation-shape signal names
+	VSRConversationFacts   classification.ConversationFacts
 	VSRMatchedProjection   []string // Matched projection mapping outputs
 	VSRProjectionScores    map[string]float64
 	VSRSignalConfidences   map[string]float64
 	VSRSignalValues        map[string]float64
 	VSRProjectionTrace     *projectiontrace.Trace
 
-	// Endpoint tracking for windowed metrics
-	SelectedEndpoint string // The endpoint address selected for this request
 	// Hallucination mitigation tracking
 	FactCheckNeeded           bool                       // Result of fact-check classification
 	FactCheckConfidence       float32                    // Confidence score of fact-check classification

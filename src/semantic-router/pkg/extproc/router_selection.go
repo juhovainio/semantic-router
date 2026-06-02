@@ -2,6 +2,8 @@ package extproc
 
 import (
 	"context"
+	"os"
+	"strings"
 	"time"
 
 	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
@@ -23,13 +25,7 @@ func createModelSelectorRegistry(cfg *config.RouterConfig, replayReader store.Re
 	if len(cfg.Categories) > 0 {
 		selectionFactory = selectionFactory.WithCategories(cfg.Categories)
 	}
-	selectionFactory = selectionFactory.WithEmbeddingFunc(func(text string) ([]float32, error) {
-		output, err := candle_binding.GetEmbeddingBatched(text, "qwen3", 1024)
-		if err != nil {
-			return nil, err
-		}
-		return output.Embedding, nil
-	})
+	selectionFactory = selectionFactory.WithEmbeddingFunc(resolveSelectionEmbeddingFunc(cfg))
 
 	lt, cancel := buildLookupTable(cfg, replayReader)
 	if lt != nil {
@@ -50,6 +46,34 @@ func createModelSelectorRegistry(cfg *config.RouterConfig, replayReader store.Re
 		"mode": "per_decision_algorithm_config",
 	})
 	return registry, lt, cancel
+}
+
+func resolveSelectionEmbeddingFunc(cfg *config.RouterConfig) func(string) ([]float32, error) {
+	backend := strings.TrimSpace(strings.ToLower(os.Getenv("EMBEDDING_BACKEND_OVERRIDE")))
+	if backend == "" {
+		backend = strings.TrimSpace(strings.ToLower(cfg.EmbeddingConfig.Backend))
+	}
+	if backend == "" {
+		backend = "candle"
+	}
+
+	modelType := strings.TrimSpace(strings.ToLower(cfg.EmbeddingConfig.ModelType))
+	if modelType == "" {
+		modelType = "qwen3"
+	}
+
+	switch backend {
+	case "openvino":
+		return openvinoEmbeddingFunc(modelType)
+	default:
+		return func(text string) ([]float32, error) {
+			output, err := candle_binding.GetEmbeddingBatched(text, modelType, 1024)
+			if err != nil {
+				return nil, err
+			}
+			return output.Embedding, nil
+		}
+	}
 }
 
 func collectConfiguredAlgorithmMethods(cfg *config.RouterConfig) []selection.SelectionMethod {
@@ -74,21 +98,31 @@ func buildModelSelectionConfig(cfg *config.RouterConfig) *selection.ModelSelecti
 		Method: "static",
 	}
 
-	eloFromDecision, routerDCFromDecision := findDecisionScopedSelectionConfigs(cfg)
-	modelSelectionCfg.Elo = buildEloSelectionConfig(cfg, eloFromDecision)
-	modelSelectionCfg.RouterDC = buildRouterDCSelectionConfig(cfg, routerDCFromDecision)
+	decisionCfgs := findDecisionScopedSelectionConfigs(cfg)
+	modelSelectionCfg.Elo = buildEloSelectionConfig(cfg, decisionCfgs.elo)
+	modelSelectionCfg.RouterDC = buildRouterDCSelectionConfig(cfg, decisionCfgs.routerDC)
 	modelSelectionCfg.AutoMix = buildAutoMixSelectionConfig(cfg)
 	modelSelectionCfg.Hybrid = buildHybridSelectionConfig(cfg)
+	modelSelectionCfg.SessionAware = buildSessionAwareSelectionConfig(cfg, decisionCfgs.sessionAware)
 	modelSelectionCfg.ML = buildMLSelectionConfig(cfg)
+	modelSelectionCfg.MultiFactor = buildMultiFactorSelectionConfig(decisionCfgs.multiFactor)
+	modelSelectionCfg.RLDriven = buildRLDrivenSelectionConfig(decisionCfgs.rlDriven)
+	modelSelectionCfg.GMTRouter = buildGMTRouterSelectionConfig(decisionCfgs.gmtRouter)
 	return modelSelectionCfg
 }
 
-func findDecisionScopedSelectionConfigs(
-	cfg *config.RouterConfig,
-) (*config.EloSelectionConfig, *config.RouterDCSelectionConfig) {
+type decisionScopedSelectionConfigs struct {
+	elo          *config.EloSelectionConfig
+	routerDC     *config.RouterDCSelectionConfig
+	rlDriven     *config.RLDrivenSelectionConfig
+	gmtRouter    *config.GMTRouterSelectionConfig
+	multiFactor  *config.MultiFactorSelectionConfig
+	sessionAware *config.SessionAwareSelectionConfig
+}
+
+func findDecisionScopedSelectionConfigs(cfg *config.RouterConfig) decisionScopedSelectionConfigs {
 	intelligentRouting := cfg.IntelligentRouting
-	var eloFromDecision *config.EloSelectionConfig
-	var routerDCFromDecision *config.RouterDCSelectionConfig
+	var result decisionScopedSelectionConfigs
 
 	for _, decision := range intelligentRouting.Decisions {
 		if decision.Algorithm == nil {
@@ -96,17 +130,37 @@ func findDecisionScopedSelectionConfigs(
 		}
 		if decision.Algorithm.Type == "elo" &&
 			decision.Algorithm.Elo != nil &&
-			eloFromDecision == nil {
-			eloFromDecision = decision.Algorithm.Elo
+			result.elo == nil {
+			result.elo = decision.Algorithm.Elo
 		}
 		if decision.Algorithm.Type == "router_dc" &&
 			decision.Algorithm.RouterDC != nil &&
-			routerDCFromDecision == nil {
-			routerDCFromDecision = decision.Algorithm.RouterDC
+			result.routerDC == nil {
+			result.routerDC = decision.Algorithm.RouterDC
+		}
+		if decision.Algorithm.Type == "rl_driven" &&
+			decision.Algorithm.RLDriven != nil &&
+			result.rlDriven == nil {
+			result.rlDriven = decision.Algorithm.RLDriven
+		}
+		if decision.Algorithm.Type == "gmtrouter" &&
+			decision.Algorithm.GMTRouter != nil &&
+			result.gmtRouter == nil {
+			result.gmtRouter = decision.Algorithm.GMTRouter
+		}
+		if decision.Algorithm.Type == "multi_factor" &&
+			decision.Algorithm.MultiFactor != nil &&
+			result.multiFactor == nil {
+			result.multiFactor = decision.Algorithm.MultiFactor
+		}
+		if decision.Algorithm.Type == "session_aware" &&
+			decision.Algorithm.SessionAware != nil &&
+			result.sessionAware == nil {
+			result.sessionAware = decision.Algorithm.SessionAware
 		}
 	}
 
-	return eloFromDecision, routerDCFromDecision
+	return result
 }
 
 func buildEloSelectionConfig(
@@ -200,6 +254,76 @@ func buildHybridSelectionConfig(cfg *config.RouterConfig) *selection.HybridConfi
 	}
 }
 
+func buildSessionAwareSelectionConfig(
+	cfg *config.RouterConfig,
+	decisionCfg *config.SessionAwareSelectionConfig,
+) *selection.SessionAwareConfig {
+	global := cfg.IntelligentRouting.ModelSelection.SessionAware
+	result := selection.DefaultSessionAwareConfig()
+	applySessionAwareSelectionConfig(result, global)
+	if decisionCfg != nil {
+		applySessionAwareSelectionConfig(result, *decisionCfg)
+	}
+	return result
+}
+
+func applySessionAwareSelectionConfig(result *selection.SessionAwareConfig, cfg config.SessionAwareSelectionConfig) {
+	if cfg.BaseMethod != "" {
+		result.BaseMethod = selection.SelectionMethod(cfg.BaseMethod)
+	}
+	if cfg.IdleTimeoutSeconds != nil {
+		result.IdleTimeoutSeconds = *cfg.IdleTimeoutSeconds
+	}
+	if cfg.MinTurnsBeforeSwitch != nil {
+		result.MinTurnsBeforeSwitch = *cfg.MinTurnsBeforeSwitch
+	}
+	if cfg.SwitchMargin != nil {
+		result.SwitchMargin = *cfg.SwitchMargin
+	}
+	if cfg.StayBias != nil {
+		result.StayBias = *cfg.StayBias
+	}
+	if cfg.ToolLoopHardLock != nil {
+		result.ToolLoopHardLock = *cfg.ToolLoopHardLock
+	}
+	if cfg.ContextPortabilityHardLock != nil {
+		result.ContextPortabilityHardLock = *cfg.ContextPortabilityHardLock
+	}
+	if cfg.DecisionDriftReset != nil {
+		result.DecisionDriftReset = *cfg.DecisionDriftReset
+	}
+	if cfg.ToolLoopStayBias != nil {
+		result.ToolLoopStayBias = *cfg.ToolLoopStayBias
+	}
+	if cfg.PrefixCacheWeight != nil {
+		result.PrefixCacheWeight = *cfg.PrefixCacheWeight
+	}
+	if cfg.HandoffPenaltyWeight != nil {
+		result.HandoffPenaltyWeight = *cfg.HandoffPenaltyWeight
+	}
+	if cfg.DefaultHandoffPenalty != nil {
+		result.DefaultHandoffPenalty = *cfg.DefaultHandoffPenalty
+	}
+	if cfg.QualityGapMultiplier != nil {
+		result.QualityGapMultiplier = *cfg.QualityGapMultiplier
+	}
+	if cfg.MaxCacheCostMultiplier != nil {
+		result.MaxCacheCostMultiplier = *cfg.MaxCacheCostMultiplier
+	}
+	if cfg.SwitchHistoryWeight != nil {
+		result.SwitchHistoryWeight = *cfg.SwitchHistoryWeight
+	}
+	if cfg.RemainingTurnPriorWeight != nil {
+		result.RemainingTurnPriorWeight = *cfg.RemainingTurnPriorWeight
+	}
+	if cfg.RemainingTurnPriorHorizon != nil {
+		result.RemainingTurnPriorHorizon = *cfg.RemainingTurnPriorHorizon
+	}
+	if cfg.MinRemainingTurnPriorSamples != nil {
+		result.MinRemainingTurnPriorSamples = *cfg.MinRemainingTurnPriorSamples
+	}
+}
+
 func buildMLSelectionConfig(cfg *config.RouterConfig) *selection.MLSelectorConfig {
 	intelligentRouting := cfg.IntelligentRouting
 	mlCfg := intelligentRouting.ModelSelection.ML
@@ -241,6 +365,145 @@ func buildMLSelectionConfig(cfg *config.RouterConfig) *selection.MLSelectorConfi
 			PretrainedPath: mlCfg.MLP.PretrainedPath,
 		},
 	}
+}
+
+func buildMultiFactorSelectionConfig(decisionCfg *config.MultiFactorSelectionConfig) *selection.MultiFactorConfig {
+	result := selection.DefaultMultiFactorConfig()
+	if decisionCfg == nil {
+		return result
+	}
+
+	if decisionCfg.Weights != nil {
+		result.Weights = selection.MultiFactorWeights{
+			Quality: decisionCfg.Weights.Quality,
+			Latency: decisionCfg.Weights.Latency,
+			Cost:    decisionCfg.Weights.Cost,
+			Load:    decisionCfg.Weights.Load,
+		}
+	}
+	if decisionCfg.SLO != nil {
+		result.SLO = selection.MultiFactorSLO{
+			MaxTPOTMs:    decisionCfg.SLO.MaxTPOTMs,
+			MaxTTFTMs:    decisionCfg.SLO.MaxTTFTMs,
+			MaxCostPer1M: decisionCfg.SLO.MaxCostPer1M,
+			MaxInflight:  decisionCfg.SLO.MaxInflight,
+		}
+	}
+	if decisionCfg.LatencyPercentile != 0 {
+		result.LatencyPercentile = decisionCfg.LatencyPercentile
+	}
+	if decisionCfg.OnNoCandidates != "" {
+		result.OnNoCandidates = decisionCfg.OnNoCandidates
+	}
+	return result
+}
+
+func buildRLDrivenSelectionConfig(decisionCfg *config.RLDrivenSelectionConfig) *selection.RLDrivenConfig {
+	result := selection.DefaultRLDrivenConfig()
+	if decisionCfg == nil {
+		return result
+	}
+
+	if decisionCfg.ExplorationRate != 0 {
+		result.ExplorationRate = decisionCfg.ExplorationRate
+	}
+	if decisionCfg.ExplorationDecay != 0 {
+		result.ExplorationDecay = decisionCfg.ExplorationDecay
+	}
+	if decisionCfg.MinExploration != 0 {
+		result.MinExploration = decisionCfg.MinExploration
+	}
+	if decisionCfg.UseThompsonSampling {
+		result.UseThompsonSampling = true
+	}
+	if decisionCfg.EnablePersonalization {
+		result.EnablePersonalization = true
+	}
+	if decisionCfg.PersonalizationBlend != 0 {
+		result.PersonalizationBlend = decisionCfg.PersonalizationBlend
+	}
+	if decisionCfg.SessionContextWeight != 0 {
+		result.SessionContextWeight = decisionCfg.SessionContextWeight
+	}
+	if decisionCfg.ImplicitFeedbackWeight != 0 {
+		result.ImplicitFeedbackWeight = decisionCfg.ImplicitFeedbackWeight
+	}
+	if decisionCfg.CostAwareness {
+		result.CostAwareness = true
+	}
+	if decisionCfg.CostWeight != 0 {
+		result.CostWeight = decisionCfg.CostWeight
+	}
+	if decisionCfg.StoragePath != "" {
+		result.StoragePath = decisionCfg.StoragePath
+	}
+	if decisionCfg.AutoSaveInterval != "" {
+		result.AutoSaveInterval = decisionCfg.AutoSaveInterval
+	}
+	if decisionCfg.UseRouterR1Rewards {
+		result.UseRouterR1Rewards = true
+	}
+	if decisionCfg.CostRewardAlpha != 0 {
+		result.CostRewardAlpha = decisionCfg.CostRewardAlpha
+	}
+	if decisionCfg.FormatRewardPenalty != 0 {
+		result.FormatRewardPenalty = decisionCfg.FormatRewardPenalty
+	}
+	if decisionCfg.EnableLLMRouting {
+		result.EnableLLMRouting = true
+	}
+	if decisionCfg.RouterR1ServerURL != "" {
+		result.RouterR1ServerURL = decisionCfg.RouterR1ServerURL
+	}
+	if decisionCfg.LLMRoutingFallback != "" {
+		result.LLMRoutingFallback = decisionCfg.LLMRoutingFallback
+	}
+	if decisionCfg.EnableMultiRoundAggregation {
+		result.EnableMultiRoundAggregation = true
+	}
+	if decisionCfg.MaxAggregationRounds != 0 {
+		result.MaxAggregationRounds = decisionCfg.MaxAggregationRounds
+	}
+	return result
+}
+
+func buildGMTRouterSelectionConfig(decisionCfg *config.GMTRouterSelectionConfig) *selection.GMTRouterConfig {
+	result := selection.DefaultGMTRouterConfig()
+	if decisionCfg == nil {
+		return result
+	}
+
+	if decisionCfg.EnablePersonalization {
+		result.EnablePersonalization = true
+	}
+	if decisionCfg.HistorySampleSize != 0 {
+		result.HistorySampleSize = decisionCfg.HistorySampleSize
+	}
+	if decisionCfg.EmbeddingDimension != 0 {
+		result.EmbeddingDimension = decisionCfg.EmbeddingDimension
+	}
+	if decisionCfg.NumGNNLayers != 0 {
+		result.NumGNNLayers = decisionCfg.NumGNNLayers
+	}
+	if decisionCfg.AttentionHeads != 0 {
+		result.AttentionHeads = decisionCfg.AttentionHeads
+	}
+	if decisionCfg.MinInteractionsForPersonalization != 0 {
+		result.MinInteractionsForPersonalization = decisionCfg.MinInteractionsForPersonalization
+	}
+	if decisionCfg.MaxInteractionsPerUser != 0 {
+		result.MaxInteractionsPerUser = decisionCfg.MaxInteractionsPerUser
+	}
+	if len(decisionCfg.FeedbackTypes) > 0 {
+		result.FeedbackTypes = append([]string(nil), decisionCfg.FeedbackTypes...)
+	}
+	if decisionCfg.ModelPath != "" {
+		result.ModelPath = decisionCfg.ModelPath
+	}
+	if decisionCfg.StoragePath != "" {
+		result.StoragePath = decisionCfg.StoragePath
+	}
+	return result
 }
 
 // buildLookupTable constructs a LookupTable from the router config.

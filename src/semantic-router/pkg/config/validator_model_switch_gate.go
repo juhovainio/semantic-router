@@ -37,6 +37,73 @@ func validateModelSwitchGate(cfg ModelSwitchGateConfig) error {
 	return nil
 }
 
+func validateSessionAwareSelectionConfig(cfg SessionAwareSelectionConfig) error {
+	intFields := []optionalNonNegativeIntField{
+		{"session_aware.idle_timeout_seconds", cfg.IdleTimeoutSeconds},
+		{"session_aware.min_turns_before_switch", cfg.MinTurnsBeforeSwitch},
+		{"session_aware.min_remaining_turn_prior_samples", cfg.MinRemainingTurnPriorSamples},
+	}
+	if err := validateOptionalNonNegativeIntFields(intFields); err != nil {
+		return err
+	}
+	if cfg.RemainingTurnPriorHorizon != nil && *cfg.RemainingTurnPriorHorizon <= 0 {
+		return fmt.Errorf(
+			"session_aware.remaining_turn_prior_horizon must be > 0, got %d",
+			*cfg.RemainingTurnPriorHorizon,
+		)
+	}
+
+	floatFields := []optionalNonNegativeFloatField{
+		{"session_aware.switch_margin", cfg.SwitchMargin},
+		{"session_aware.stay_bias", cfg.StayBias},
+		{"session_aware.tool_loop_stay_bias", cfg.ToolLoopStayBias},
+		{"session_aware.prefix_cache_weight", cfg.PrefixCacheWeight},
+		{"session_aware.handoff_penalty_weight", cfg.HandoffPenaltyWeight},
+		{"session_aware.default_handoff_penalty", cfg.DefaultHandoffPenalty},
+		{"session_aware.quality_gap_multiplier", cfg.QualityGapMultiplier},
+		{"session_aware.switch_history_weight", cfg.SwitchHistoryWeight},
+		{"session_aware.remaining_turn_prior_weight", cfg.RemainingTurnPriorWeight},
+	}
+	if err := validateOptionalNonNegativeFloatFields(floatFields); err != nil {
+		return err
+	}
+	if cfg.MaxCacheCostMultiplier != nil && *cfg.MaxCacheCostMultiplier < 1 {
+		return fmt.Errorf(
+			"session_aware.max_cache_cost_multiplier must be >= 1, got %v",
+			*cfg.MaxCacheCostMultiplier,
+		)
+	}
+	return nil
+}
+
+type optionalNonNegativeIntField struct {
+	name  string
+	value *int
+}
+
+func validateOptionalNonNegativeIntFields(fields []optionalNonNegativeIntField) error {
+	for _, field := range fields {
+		if field.value != nil && *field.value < 0 {
+			return fmt.Errorf("%s must be >= 0, got %d", field.name, *field.value)
+		}
+	}
+	return nil
+}
+
+type optionalNonNegativeFloatField struct {
+	name  string
+	value *float64
+}
+
+func validateOptionalNonNegativeFloatFields(fields []optionalNonNegativeFloatField) error {
+	for _, field := range fields {
+		if field.value != nil && *field.value < 0 {
+			return fmt.Errorf("%s must be >= 0, got %v", field.name, *field.value)
+		}
+	}
+	return nil
+}
+
 // warnModelSwitchGateEnforceWithoutCostSignals emits a startup warning when
 // enforce is configured but neither lookup_tables nor a default handoff penalty
 // is in place. In that situation the gate's stay cost has no real evidence and

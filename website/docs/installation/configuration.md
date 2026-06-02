@@ -41,7 +41,7 @@ The detailed background is in [Unified Config Contract v0.3](../proposals/unifie
 - `global` owns router-wide runtime overrides.
   - `global.router` groups router-engine control knobs such as config-source selection, route-cache, and model-selection defaults
   - `global.router.config_source` selects whether runtime config comes from the canonical YAML file (`file`) or from in-process Kubernetes CRD reconciliation (`kubernetes`)
-  - `global.router.model_selection.model_switch_gate` enables optional shadow or enforce-mode auditing for session-aware stay-vs-switch decisions after a selector chooses a candidate model. `mode: enforce` only takes effect on Response API requests with conversation history; Chat Completions traffic is observed in shadow regardless of mode until per-turn model history persistence ships, and a `model_switch_gate_enforce_unavailable` warning is logged whenever enforce was configured but the gate had to fall back to audit-only.
+  - `decision.algorithm.type=session_aware` enables agentic stay-vs-switch routing with router-owned session memory, tool-loop and provider-state hard locks, decision-drift and idle-time re-selection, input checkout prefix-cache cost, confidence-gated remaining-turn priors, and replayed policy traces. Cache-cost multipliers must be at least neutral (`max_cache_cost_multiplier >= 1`) and remaining-turn prior horizons must be positive.
   - `global.services` groups shared APIs and control-plane services such as `response_api`, `router_replay`, `observability`, `authz`, and `ratelimit`
   - `global.services.router_replay.enabled` acts as the default replay switch for every decision; route-local `router_replay.enabled: false` is the explicit opt-out
   - `global.stores` groups shared storage-backed services such as `semantic_cache`, `memory`, and `vector_store`
@@ -52,6 +52,7 @@ The detailed background is in [Unified Config Contract v0.3](../proposals/unifie
 - built-in knowledge bases keep canonical source paths like `knowledge_bases/privacy/`; local runtime seeds missing KBs into `.vllm-sr/knowledge_bases/<dir>/` once and then reads the shared runtime KB store from there
 - `global.model_catalog.classifiers[]` is the reusable registry for startup-loaded classifier packages such as taxonomy classifiers
 - `global.model_catalog.modules` groups capability modules such as `prompt_guard`, `classifier`, `complexity`, and `hallucination_mitigation`
+- `global.model_catalog.modules.prompt_compression.profile` provides built-in signal-compression scoring defaults for `default`, `coding`, `medical`, `security`, and `multi_turn` workloads. The `multi-turn` alias is normalized to `multi_turn`, unknown profile names fail config validation, and explicit weights/preserve counts override the selected profile.
 
 ## Canonical example
 
@@ -342,7 +343,8 @@ See [Kubernetes Operator](./k8s/operator).
 
 DSL only owns the `routing` surface.
 
-- Author `MODEL`, `SIGNAL`, and `ROUTE`
+- Author `MODEL`, `SIGNAL`, `PROJECTION`, and `ROUTE` blocks
+- Put per-decision model-selection policy in `ROUTE ... ALGORITHM`
 - Compile to a routing fragment
 - Keep `providers` and `global` in YAML
 
@@ -352,6 +354,7 @@ The DSL compiler emits:
 routing:
   modelCards:
   signals:
+  projections:
   decisions:
 ```
 

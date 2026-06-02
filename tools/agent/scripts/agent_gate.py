@@ -12,14 +12,13 @@ from agent_artifacts import (
     write_default_report_artifacts,
     write_explicit_report_artifact,
 )
+from agent_changed_files import get_changed_files
+from agent_context_resolution import resolve_context, unique_preserve_order
 from agent_resolution import (
     build_report,
-    get_changed_files,
-    resolve_context,
     resolve_environment,
     resolve_skill,
     run_local_e2e,
-    unique_preserve_order,
 )
 from agent_scorecard import build_harness_scorecard
 from agent_support import (
@@ -66,7 +65,7 @@ def handle_resolve_env(args: argparse.Namespace) -> int:
 
 
 def handle_resolve_skill(args: argparse.Namespace, changed_files: list[str]) -> int:
-    skill = resolve_skill(changed_files, getattr(args, "env", None))
+    skill = resolve_skill(changed_files)
     if args.format == "json":
         print(skill.to_json())
     elif args.format == "env":
@@ -170,7 +169,6 @@ def _add_resolve_subparser(subparsers) -> None:
 def _add_resolve_skill_subparser(subparsers) -> None:
     resolve_skill = subparsers.add_parser("resolve-skill")
     _add_changed_file_args(resolve_skill)
-    resolve_skill.add_argument("--env", default=None)
     _add_format_arg(
         resolve_skill, choices=["json", "env", "summary"], default="summary"
     )
@@ -181,7 +179,7 @@ def _add_resolve_env_subparser(subparsers) -> None:
     resolve_env.add_argument("--env", required=True)
     resolve_env.add_argument(
         "--field",
-        choices=["build_target", "serve_command", "smoke_config", "local_dev_fragment"],
+        choices=["build_target", "serve_command", "smoke_config"],
         default=None,
     )
     _add_format_arg(resolve_env, choices=["json", "env", "summary"], default="summary")

@@ -9,6 +9,7 @@ var RouterSmoke = []string{
 var BaselineRouterContract = []string{
 	"chat-completions-request",
 	"anthropic-messages-request",
+	"anthropic-messages-protocol-headers",
 	"apiserver-runtime-config-endpoints",
 	"apiserver-classification-endpoints",
 	"chat-completions-stress-request",
@@ -23,6 +24,7 @@ var BaselineRouterContract = []string{
 	"decision-fallback-behavior",
 	"plugin-config-variations",
 	"chat-completions-progressive-stress",
+	"anthropic-passthrough-openai-regression",
 	// Session observability
 	"session-telemetry-metrics",
 	"session-pricing-chat-completions",

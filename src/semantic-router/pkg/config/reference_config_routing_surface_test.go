@@ -3,25 +3,24 @@ package config
 import "reflect"
 
 var referenceSignalKeyByType = map[string]string{
-	SignalTypeAuthz:         "role_bindings",
-	SignalTypeComplexity:    "complexity",
-	SignalTypeContext:       "context",
-	SignalTypeDomain:        "domains",
-	SignalTypeEmbedding:     "embeddings",
-	SignalTypeFactCheck:     "fact_check",
-	SignalTypeJailbreak:     "jailbreak",
-	SignalTypeKeyword:       "keywords",
-	SignalTypeLanguage:      "language",
-	SignalTypeModality:      "modality",
-	SignalTypePII:           "pii",
-	SignalTypePreference:    "preferences",
-	SignalTypeReask:         "reasks",
-	SignalTypeStructure:     "structure",
-	SignalTypeConversation:  "conversation",
-	SignalTypeKB:            "kb",
-	SignalTypeUserFeedback:  "user_feedbacks",
-	SignalTypeSessionMetric: "session_metrics",
-	SignalTypeEventContext:  "event_context_rules",
+	SignalTypeAuthz:        "role_bindings",
+	SignalTypeComplexity:   "complexity",
+	SignalTypeContext:      "context",
+	SignalTypeDomain:       "domains",
+	SignalTypeEmbedding:    "embeddings",
+	SignalTypeFactCheck:    "fact_check",
+	SignalTypeJailbreak:    "jailbreak",
+	SignalTypeKeyword:      "keywords",
+	SignalTypeLanguage:     "language",
+	SignalTypeModality:     "modality",
+	SignalTypePII:          "pii",
+	SignalTypePreference:   "preferences",
+	SignalTypeReask:        "reasks",
+	SignalTypeStructure:    "structure",
+	SignalTypeConversation: "conversation",
+	SignalTypeKB:           "kb",
+	SignalTypeUserFeedback: "user_feedbacks",
+	SignalTypeEvent:        "events",
 }
 
 func assertSupportedSignalTypesInReferenceConfig(t testingT, root map[string]interface{}) {
@@ -54,6 +53,8 @@ func assertSupportedAlgorithmsInReferenceConfig(t testingT, decisions []interfac
 	assertMapCoversStructFields(t, mustMapAt(t, algorithmsByType["rl_driven"], "rl_driven"), reflect.TypeOf(RLDrivenSelectionConfig{}), "routing.decisions[].algorithm.rl_driven")
 	assertMapCoversStructFields(t, mustMapAt(t, algorithmsByType["gmtrouter"], "gmtrouter"), reflect.TypeOf(GMTRouterSelectionConfig{}), "routing.decisions[].algorithm.gmtrouter")
 	assertMapCoversStructFields(t, mustMapAt(t, algorithmsByType["latency_aware"], "latency_aware"), reflect.TypeOf(LatencyAwareAlgorithmConfig{}), "routing.decisions[].algorithm.latency_aware")
+	assertMapCoversStructFields(t, mustMapAt(t, algorithmsByType["multi_factor"], "multi_factor"), reflect.TypeOf(MultiFactorSelectionConfig{}), "routing.decisions[].algorithm.multi_factor")
+	assertMapCoversStructFields(t, mustMapAt(t, algorithmsByType["session_aware"], "session_aware"), reflect.TypeOf(SessionAwareSelectionConfig{}), "routing.decisions[].algorithm.session_aware")
 }
 
 func assertReferenceConfidenceAlgorithmCoverage(t testingT, algorithmsByType map[string]map[string]interface{}) {

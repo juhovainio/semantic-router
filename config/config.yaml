@@ -25,6 +25,7 @@ providers:
       pricing:
         currency: USD
         prompt_per_1m: 0.18
+        cached_input_per_1m: 0.04
         completion_per_1m: 0.42
       external_model_ids:
         openai: qwen3-8b
@@ -36,7 +37,7 @@ providers:
           weight: 80
           type: chat
           api_key_env: VLLM_SR_PRIMARY_API_KEY
-        - name: remote-fallback
+        - name: remote-secondary
           base_url: https://api.example.com/v1
           provider: openai
           auth_header: Authorization
@@ -54,6 +55,7 @@ providers:
       pricing:
         currency: USD
         prompt_per_1m: 1.2
+        cached_input_per_1m: 0.3
         completion_per_1m: 3.4
       external_model_ids:
         internal: qwen3-32b
@@ -68,6 +70,7 @@ providers:
       pricing:
         currency: USD
         prompt_per_1m: 2.5
+        cached_input_per_1m: 0.5
         completion_per_1m: 4.0
       external_model_ids:
         openai: llava-omni-preview
@@ -135,6 +138,12 @@ routing:
         operator: OR
         method: bm25
         keywords: ["code", "function", "debug", "algorithm", "refactor"]
+        case_sensitive: false
+        bm25_threshold: 0.1
+      - name: machine_learning
+        operator: OR
+        method: bm25
+        keywords: ["machine learning", "model training", "gradient", "neural network", "classifier"]
         case_sensitive: false
         bm25_threshold: 0.1
       - name: urgent_keywords
@@ -443,6 +452,14 @@ routing:
             type: tool_definition
         predicate:
           gte: 1
+      - name: active_tool_use
+        description: Tool-result continuation inside an agent loop.
+        feature:
+          type: count
+          source:
+            type: assistant_tool_cycle
+        predicate:
+          gte: 1
       - name: has_developer_msg
         description: Request contains a developer message.
         feature:
@@ -461,22 +478,9 @@ routing:
           gt: 5
           lte: 99
 
-    session_metrics:
-      - name: session_cost_pressure
-        kind: state
-        state: session_routing.cumulative_cost_usd
-        normalize: minmax
-        min: 0
-        max: 10
-      - name: handoff_penalty
-        kind: lookup
-        table: handoff_penalties
-        key:
-          - session_routing.current_model
-          - session_routing.candidate_model
-
-    event_context_rules:
+    events:
       - name: critical_payment_event
+        description: Critical payment or transaction events that need incident-grade routing.
         event_types:
           - payment_failed
           - transaction_declined
@@ -545,24 +549,6 @@ routing:
             lt: 0.45
           - name: support_escalated
             gte: 0.45
-
-  session_states:
-    - name: session_routing
-      fields:
-        - name: turn_number
-          type: int
-        - name: current_model
-          type: string
-        - name: cumulative_cost_usd
-          type: float
-        - name: retry_count_ema
-          type: float
-        - name: quality_score_ema
-          type: float
-        - name: kv_cache_warm
-          type: float
-        - name: candidate_model
-          type: string
 
   decisions:
     - name: static_business_route
@@ -668,13 +654,15 @@ routing:
           escalation_order: small_to_large
           cost_quality_tradeoff: 0.45
           token_filter: alpha_numeric
+          verifier_server_url: ""
+          verifier_timeout_seconds: 0
       plugins:
         - type: hallucination
           configuration:
             enabled: true
             use_nli: true
-            hallucination_action: annotate
-            unverified_factual_action: warn
+            hallucination_action: header
+            unverified_factual_action: header
             include_hallucination_details: true
         # Disabled sample: filter mode only (reference config union coverage for ToolSelectionPluginConfig filter fields).
         - type: tool_selection
@@ -733,7 +721,7 @@ routing:
           - type: domain
             name: "computer science"
           - type: complexity
-            name: needs_reasoning
+            name: needs_reasoning:hard
       modelRefs:
         - model: qwen3-8b
           use_reasoning: true
@@ -884,7 +872,7 @@ routing:
           configuration:
             enabled: true
             threshold: 0.85
-            action: annotate
+            action: header
 
     - name: safe_hybrid_route
       description: Composite route combining AND, OR, and NOT with Hybrid selection.
@@ -899,7 +887,7 @@ routing:
               - type: keyword
                 name: urgent_keywords
               - type: complexity
-                name: needs_reasoning
+                name: needs_reasoning:hard
           - operator: NOT
             conditions:
               - type: jailbreak
@@ -913,7 +901,7 @@ routing:
         type: hybrid
         hybrid:
           elo_weight: 0.4
-          router_dc_weight: 0.4
+          router_dc_weight: 0.3
           automix_weight: 0.2
           cost_weight: 0.1
           quality_gap_threshold: 0.08
@@ -935,14 +923,25 @@ routing:
         type: rl_driven
         rl_driven:
           exploration_rate: 0.15
+          exploration_decay: 0.97
+          min_exploration: 0.03
           use_thompson_sampling: true
           enable_personalization: true
           personalization_blend: 0.4
+          session_context_weight: 0.35
+          implicit_feedback_weight: 0.5
           cost_awareness: true
           cost_weight: 0.2
+          storage_path: state/rl-driven.json
+          auto_save_interval: 30s
           use_router_r1_rewards: true
+          cost_reward_alpha: 0.3
+          format_reward_penalty: -1.0
           enable_llm_routing: true
           router_r1_server_url: http://router-r1:8080
+          llm_routing_fallback: thompson
+          enable_multi_round_aggregation: true
+          max_aggregation_rounds: 3
       plugins:
         - type: rag
           configuration:
@@ -979,8 +978,15 @@ routing:
         gmtrouter:
           enable_personalization: true
           history_sample_size: 50
+          embedding_dimension: 768
+          num_gnn_layers: 2
+          attention_heads: 8
           min_interactions_for_personalization: 5
           max_interactions_per_user: 200
+          feedback_types:
+            - rating
+            - ranking
+            - response
           model_path: models/gmtrouter.pt
           storage_path: state/gmtrouter.db
       plugins:
@@ -1041,6 +1047,68 @@ routing:
                 query: ${user_content}
                 top_k: ${top_k}
               timeout_seconds: 20
+
+    # multi_factor example: composes quality/latency/cost/load into one
+    # weighted score with optional SLO ceilings. Issue #37.
+    - name: multi_factor_route
+      description: Compose quality, latency, cost, and load signals into a single weighted score.
+      priority: 124
+      rules:
+        operator: AND
+        conditions:
+          - type: domain
+            name: other
+      modelRefs:
+        - model: qwen3-8b
+        - model: qwen3-32b
+      algorithm:
+        type: multi_factor
+        multi_factor:
+          weights:
+            quality: 0.4
+            latency: 0.2
+            cost: 0.2
+            load: 0.2
+          slo:
+            max_tpot_ms: 200
+            max_ttft_ms: 800
+            max_cost_per_1m: 5.0
+            max_inflight: 50
+          latency_percentile: 95
+          on_no_candidates: cheapest
+
+    - name: agentic_session_route
+      description: Session-aware policy for agentic multi-turn traffic.
+      priority: 123
+      rules:
+        operator: AND
+        conditions:
+          - type: conversation
+            name: active_tool_use
+      modelRefs:
+        - model: qwen3-8b
+        - model: qwen3-32b
+      algorithm:
+        type: session_aware
+        session_aware:
+          base_method: hybrid
+          idle_timeout_seconds: 300
+          min_turns_before_switch: 1
+          switch_margin: 0.05
+          stay_bias: 0.10
+          tool_loop_hard_lock: true
+          context_portability_hard_lock: true
+          decision_drift_reset: true
+          tool_loop_stay_bias: 0.35
+          prefix_cache_weight: 0.20
+          handoff_penalty_weight: 1.0
+          default_handoff_penalty: 0.05
+          quality_gap_multiplier: 1.0
+          max_cache_cost_multiplier: 2.5
+          switch_history_weight: 0.04
+          remaining_turn_prior_weight: 1.0
+          remaining_turn_prior_horizon: 8
+          min_remaining_turn_prior_samples: 3
 
     - name: fallback_knn_route
       description: KNN fallback route for general traffic with OpenAI vector-store RAG.
@@ -1128,7 +1196,7 @@ routing:
         - type: header_mutation
           configuration:
             add:
-              - key: x-escalation-reason
+              - name: x-escalation-reason
                 value: repeated-question
 
     - name: safe_only_svm_route
@@ -1293,11 +1361,30 @@ global:
         use_logprob_verification: true
       hybrid:
         elo_weight: 0.4
-        router_dc_weight: 0.35
+        router_dc_weight: 0.25
         automix_weight: 0.25
         cost_weight: 0.1
         quality_gap_threshold: 0.08
         normalize_scores: true
+      session_aware:
+        base_method: hybrid
+        idle_timeout_seconds: 300
+        min_turns_before_switch: 1
+        switch_margin: 0.05
+        stay_bias: 0.10
+        tool_loop_hard_lock: true
+        context_portability_hard_lock: true
+        decision_drift_reset: true
+        tool_loop_stay_bias: 0.35
+        prefix_cache_weight: 0.20
+        handoff_penalty_weight: 1.0
+        default_handoff_penalty: 0.05
+        quality_gap_multiplier: 1.0
+        max_cache_cost_multiplier: 2.5
+        switch_history_weight: 0.04
+        remaining_turn_prior_weight: 1.0
+        remaining_turn_prior_horizon: 8
+        min_remaining_turn_prior_samples: 3
       momentum:
         enabled: false
         attack: 0.7
@@ -1837,6 +1924,7 @@ global:
         bert_model_path: models/mom-embedding-light
         use_cpu: true
         embedding_config:
+          backend: candle
           model_type: mmbert
           preload_embeddings: true
           target_dimension: 768
@@ -1969,17 +2057,20 @@ global:
     modules:
       prompt_compression:
         enabled: true
+        # Built-in profile for scoring/preserve defaults: default, coding, medical,
+        # security, or multi_turn. The multi-turn alias is normalized to multi_turn.
+        # Unknown profiles fail config validation. Explicit weights override the profile.
+        profile: default
         max_tokens: 4096
         min_length: 512
         skip_signals: [jailbreak, pii]
         textrank_weight: 0.4
         position_weight: 0.2
         tfidf_weight: 0.3
+        novelty_weight: 0.1
         position_depth: 0.1
-        # Hard safety limit applied before any signal processing, independent of
-        # the quality-aware compression above. 0 = no limit (default).
-        # Recommended production value: 8192 (~2K tokens).
-        max_evaluation_chars: 0
+        preserve_first_n: 3
+        preserve_last_n: 2
       prompt_guard:
         enabled: true
         model_ref: prompt_guard

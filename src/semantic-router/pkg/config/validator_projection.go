@@ -385,7 +385,6 @@ func isProjectionInputTypeSupported(signalType string) bool {
 		SignalTypePII,
 		SignalTypeKB,
 		SignalTypeConversation,
-		SignalTypeSessionMetric,
 		ProjectionInputKBMetric,
 		SignalTypeProjection:
 		return true
@@ -396,37 +395,25 @@ func isProjectionInputTypeSupported(signalType string) bool {
 
 func projectionDeclaredSignals(cfg *RouterConfig) map[string]map[string]struct{} {
 	declared := map[string]map[string]struct{}{
-		SignalTypeKeyword:       collectKeywordRuleNames(cfg.KeywordRules),
-		SignalTypeEmbedding:     collectEmbeddingRuleNames(cfg.EmbeddingRules),
-		SignalTypeDomain:        collectDomainNames(cfg.Categories),
-		SignalTypeFactCheck:     collectFactCheckRuleNames(cfg.FactCheckRules),
-		SignalTypeUserFeedback:  collectUserFeedbackRuleNames(cfg.UserFeedbackRules),
-		SignalTypeReask:         collectReaskRuleNames(cfg.ReaskRules),
-		SignalTypePreference:    collectPreferenceRuleNames(cfg.PreferenceRules),
-		SignalTypeLanguage:      collectLanguageRuleNames(cfg.LanguageRules),
-		SignalTypeContext:       collectContextRuleNames(cfg.ContextRules),
-		SignalTypeStructure:     collectStructureRuleNames(cfg.StructureRules),
-		SignalTypeComplexity:    collectComplexityRuleNames(cfg.ComplexityRules),
-		SignalTypeModality:      collectModalityRuleNames(cfg.ModalityRules),
-		SignalTypeAuthz:         collectRoleBindingNames(cfg.GetRoleBindings()),
-		SignalTypeJailbreak:     collectJailbreakRuleNames(cfg.JailbreakRules),
-		SignalTypePII:           collectPIIRuleNames(cfg.PIIRules),
-		SignalTypeKB:            collectKBRuleNames(cfg.KBRules),
-		SignalTypeConversation:  collectConversationRuleNames(cfg.ConversationRules),
-		SignalTypeSessionMetric: collectSessionMetricRuleNames(cfg.SessionMetricRules),
+		SignalTypeKeyword:      collectKeywordRuleNames(cfg.KeywordRules),
+		SignalTypeEmbedding:    collectEmbeddingRuleNames(cfg.EmbeddingRules),
+		SignalTypeDomain:       collectDomainNames(cfg.Categories),
+		SignalTypeFactCheck:    collectFactCheckRuleNames(cfg.FactCheckRules),
+		SignalTypeUserFeedback: collectUserFeedbackRuleNames(cfg.UserFeedbackRules),
+		SignalTypeReask:        collectReaskRuleNames(cfg.ReaskRules),
+		SignalTypePreference:   collectPreferenceRuleNames(cfg.PreferenceRules),
+		SignalTypeLanguage:     collectLanguageRuleNames(cfg.LanguageRules),
+		SignalTypeContext:      collectContextRuleNames(cfg.ContextRules),
+		SignalTypeStructure:    collectStructureRuleNames(cfg.StructureRules),
+		SignalTypeComplexity:   collectComplexityRuleNames(cfg.ComplexityRules),
+		SignalTypeModality:     collectModalityRuleNames(cfg.ModalityRules),
+		SignalTypeAuthz:        collectRoleBindingNames(cfg.GetRoleBindings()),
+		SignalTypeJailbreak:    collectJailbreakRuleNames(cfg.JailbreakRules),
+		SignalTypePII:          collectPIIRuleNames(cfg.PIIRules),
+		SignalTypeKB:           collectKBRuleNames(cfg.KBRules),
+		SignalTypeConversation: collectConversationRuleNames(cfg.ConversationRules),
 	}
 	return declared
-}
-
-func collectSessionMetricRuleNames(rules []SessionMetricRule) map[string]struct{} {
-	out := make(map[string]struct{}, len(rules))
-	for _, r := range rules {
-		if r.Name == "" {
-			continue
-		}
-		out[r.Name] = struct{}{}
-	}
-	return out
 }
 
 func projectionInputDeclared(declared map[string]map[string]struct{}, signalType string, name string) bool {
@@ -474,11 +461,27 @@ func validateProjectionMapping(
 	if _, exists := scoreNames[mapping.Source]; !exists {
 		return fmt.Errorf("routing.projections.mappings[%q]: source %q is not a declared projection score", mapping.Name, mapping.Source)
 	}
-	if mapping.Method != "threshold_bands" {
-		return fmt.Errorf("routing.projections.mappings[%q]: unsupported method %q (supported: threshold_bands)", mapping.Name, mapping.Method)
+	switch mapping.Method {
+	case "", ProjectionMappingMethodThresholdBands, ProjectionMappingMethodMultiEmit:
+		// supported (empty defaults to threshold_bands)
+	default:
+		return fmt.Errorf(
+			"routing.projections.mappings[%q]: unsupported method %q (supported: %s, %s)",
+			mapping.Name,
+			mapping.Method,
+			ProjectionMappingMethodThresholdBands,
+			ProjectionMappingMethodMultiEmit,
+		)
 	}
 	if len(mapping.Outputs) == 0 {
 		return fmt.Errorf("routing.projections.mappings[%q]: outputs cannot be empty", mapping.Name)
+	}
+	if mapping.Method == ProjectionMappingMethodMultiEmit && len(mapping.Outputs) < 2 {
+		return fmt.Errorf(
+			"routing.projections.mappings[%q]: method %q requires at least 2 outputs (a single-output multi_emit is equivalent to threshold_bands)",
+			mapping.Name,
+			ProjectionMappingMethodMultiEmit,
+		)
 	}
 	if err := validateProjectionCalibration(mapping); err != nil {
 		return err

@@ -1,6 +1,6 @@
 """Algorithm configuration models for multi-model orchestration."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelRef(BaseModel):
@@ -48,16 +48,12 @@ class ConfidenceAlgorithmConfig(BaseModel):
     on_error: str | None = "skip"
 
 
-class ConcurrentAlgorithmConfig(BaseModel):
-    """Configuration for concurrent algorithm.
+class RatingsAlgorithmConfig(BaseModel):
+    """Configuration for the ratings looper algorithm."""
 
-    This algorithm executes all models concurrently and aggregates results (arena mode).
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    # Maximum number of concurrent model calls (default: no limit)
-    max_concurrent: int | None = None
-
-    # Behavior on model call failure: "skip" or "fail"
+    max_concurrent: int | None = Field(default=None, ge=1)
     on_error: str | None = "skip"
 
 
@@ -233,6 +229,64 @@ class HybridSelectionConfig(BaseModel):
     normalize_scores: bool | None = True
 
 
+class SessionAwareSelectionConfig(BaseModel):
+    """Configuration for session-aware agentic model selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_method: str | None = "hybrid"
+    idle_timeout_seconds: int | None = Field(default=300, ge=0)
+    min_turns_before_switch: int | None = Field(default=1, ge=0)
+    switch_margin: float | None = Field(default=0.05, ge=0)
+    stay_bias: float | None = Field(default=0.10, ge=0)
+    tool_loop_hard_lock: bool | None = True
+    context_portability_hard_lock: bool | None = True
+    decision_drift_reset: bool | None = True
+    tool_loop_stay_bias: float | None = Field(default=0.35, ge=0)
+    prefix_cache_weight: float | None = Field(default=0.20, ge=0)
+    handoff_penalty_weight: float | None = Field(default=1.0, ge=0)
+    default_handoff_penalty: float | None = Field(default=0.05, ge=0)
+    quality_gap_multiplier: float | None = Field(default=1.0, ge=0)
+    max_cache_cost_multiplier: float | None = Field(default=2.5, ge=1)
+    switch_history_weight: float | None = Field(default=0.04, ge=0)
+    remaining_turn_prior_weight: float | None = Field(default=1.0, ge=0)
+    remaining_turn_prior_horizon: int | None = Field(default=8, ge=1)
+    min_remaining_turn_prior_samples: int | None = Field(default=3, ge=0)
+
+
+class MultiFactorWeightsConfig(BaseModel):
+    """Weights for the multi_factor selector."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quality: float | None = Field(default=None, ge=0)
+    latency: float | None = Field(default=None, ge=0)
+    cost: float | None = Field(default=None, ge=0)
+    load: float | None = Field(default=None, ge=0)
+
+
+class MultiFactorSLOConfig(BaseModel):
+    """SLO ceilings for the multi_factor selector."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tpot_ms: float | None = Field(default=None, ge=0)
+    max_ttft_ms: float | None = Field(default=None, ge=0)
+    max_cost_per_1m: float | None = Field(default=None, ge=0)
+    max_inflight: int | None = Field(default=None, ge=0)
+
+
+class MultiFactorSelectionConfig(BaseModel):
+    """Configuration for the canonical multi_factor selector."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    weights: MultiFactorWeightsConfig | None = None
+    slo: MultiFactorSLOConfig | None = None
+    latency_percentile: int | None = Field(default=95, ge=1, le=100)
+    on_no_candidates: str | None = "cheapest"
+
+
 # =============================================================================
 # RL-Driven Model Selection Algorithm Configs (from PR #1196 / Issue #994)
 # Reference papers:
@@ -242,26 +296,32 @@ class HybridSelectionConfig(BaseModel):
 # =============================================================================
 
 
-class ThompsonSamplingConfig(BaseModel):
-    """Configuration for Thompson Sampling model selection.
+class RLDrivenSelectionConfig(BaseModel):
+    """Configuration for the canonical rl_driven selection algorithm.
 
-    Uses Bayesian posterior sampling for exploration/exploitation balance.
+    Matches decision.algorithm.rl_driven in the router config contract.
     """
 
-    # Prior alpha for Beta distribution (default: 1.0)
-    prior_alpha: float | None = Field(default=1.0, gt=0)
-
-    # Prior beta for Beta distribution (default: 1.0)
-    prior_beta: float | None = Field(default=1.0, gt=0)
-
-    # Enable per-user personalization
-    per_user: bool | None = False
-
-    # Decay factor for old observations (0 = no decay)
-    decay_factor: float | None = Field(default=0.0, ge=0, le=1)
-
-    # Minimum samples before exploitation (default: 10)
-    min_samples: int | None = Field(default=10, ge=0)
+    exploration_rate: float | None = Field(default=0.3, ge=0, le=1)
+    exploration_decay: float | None = Field(default=0.99, ge=0, le=1)
+    min_exploration: float | None = Field(default=0.05, ge=0, le=1)
+    use_thompson_sampling: bool | None = True
+    enable_personalization: bool | None = True
+    personalization_blend: float | None = Field(default=0.7, ge=0, le=1)
+    session_context_weight: float | None = Field(default=0.3, ge=0, le=1)
+    implicit_feedback_weight: float | None = Field(default=0.5, ge=0, le=1)
+    cost_awareness: bool | None = True
+    cost_weight: float | None = Field(default=0.2, ge=0)
+    storage_path: str | None = None
+    auto_save_interval: str | None = "30s"
+    use_router_r1_rewards: bool | None = True
+    cost_reward_alpha: float | None = Field(default=0.3, ge=0, le=1)
+    format_reward_penalty: float | None = -1.0
+    enable_llm_routing: bool | None = False
+    router_r1_server_url: str | None = None
+    llm_routing_fallback: str | None = "thompson"
+    enable_multi_round_aggregation: bool | None = False
+    max_aggregation_rounds: int | None = Field(default=None, ge=1)
 
 
 class GMTRouterConfig(BaseModel):
@@ -270,6 +330,21 @@ class GMTRouterConfig(BaseModel):
     Uses heterogeneous GNN for personalized routing decisions.
     """
 
+    # Canonical router config fields.
+    enable_personalization: bool | None = True
+    history_sample_size: int | None = Field(default=5, gt=0)
+    embedding_dimension: int | None = Field(default=768, gt=0)
+    num_gnn_layers: int | None = Field(default=2, ge=1, le=5)
+    attention_heads: int | None = Field(default=8, ge=1)
+    min_interactions_for_personalization: int | None = Field(default=3, ge=0)
+    max_interactions_per_user: int | None = Field(default=100, gt=0)
+    feedback_types: list[str] | None = Field(
+        default_factory=lambda: ["rating", "ranking"]
+    )
+    model_path: str | None = None
+    storage_path: str | None = None
+
+    # Legacy CLI aliases retained for compatibility with older local scripts.
     # Number of GNN layers (default: 2)
     num_layers: int | None = Field(default=2, ge=1, le=5)
 
@@ -282,31 +357,6 @@ class GMTRouterConfig(BaseModel):
     # Enable user preference learning
     learn_preferences: bool | None = True
 
-    # Path to pre-trained model weights (optional)
-    model_path: str | None = None
-
-
-class RouterR1Config(BaseModel):
-    """Configuration for Router-R1 (LLM-as-router) model selection.
-
-    Uses LLM with think/route actions for routing decisions.
-    """
-
-    # Router LLM endpoint (required for full functionality)
-    router_endpoint: str | None = None
-
-    # Maximum think iterations (default: 3)
-    max_iterations: int | None = Field(default=3, ge=1, le=10)
-
-    # Temperature for router LLM (default: 0.7)
-    temperature: float | None = Field(default=0.7, ge=0, le=2)
-
-    # Enable chain-of-thought reasoning
-    use_cot: bool | None = True
-
-    # Fallback to static if router unavailable
-    fallback_to_static: bool | None = True
-
 
 class AlgorithmConfig(BaseModel):
     """Algorithm configuration for multi-model decisions.
@@ -317,7 +367,7 @@ class AlgorithmConfig(BaseModel):
 
     1. Looper algorithms (multi-model execution):
        - "confidence": Try smaller models first, escalate if confidence is low
-       - "concurrent": Execute all models concurrently (arena mode)
+       - "ratings": Coordinate bounded candidate execution
        - "remom": Multi-round parallel reasoning with intelligent synthesis
 
     2. Selection algorithms (single model selection from candidates):
@@ -326,21 +376,26 @@ class AlgorithmConfig(BaseModel):
        - "router_dc": Use embedding similarity for query-model matching
        - "automix": Use POMDP-based cost-quality optimization
        - "hybrid": Combine multiple selection methods
+       - "knn", "kmeans", "svm", "mlp": Shared ML model-selection selectors
+       - "multi_factor": Combine quality, latency, cost, and load
+       - "session_aware": Agentic long-horizon routing with router-owned session memory
 
-    3. RL-driven selection algorithms (from issue #994):
-       - "thompson": Thompson Sampling with exploration/exploitation
+    3. RL-driven selection algorithms:
+       - "rl_driven": Canonical online learning with optional Thompson / Router-R1 modes
        - "gmtrouter": Graph neural network for personalized routing
-       - "router_r1": LLM-as-router with think/route actions
     """
 
-    # Algorithm type: looper ("confidence", "concurrent", "remom", "latency_aware") or
+    model_config = ConfigDict(extra="forbid")
+
+    # Algorithm type: looper ("confidence", "ratings", "remom") or
     # selection ("static", "elo", "router_dc", "automix", "hybrid",
-    #            "thompson", "gmtrouter", "router_r1")
+    #            "knn", "kmeans", "svm", "mlp", "multi_factor",
+    #            "rl_driven", "gmtrouter", "latency_aware", "session_aware")
     type: str
 
     # Looper algorithm configurations
     confidence: ConfidenceAlgorithmConfig | None = None
-    concurrent: ConcurrentAlgorithmConfig | None = None
+    ratings: RatingsAlgorithmConfig | None = None
     remom: ReMoMAlgorithmConfig | None = None
     latency_aware: LatencyAwareAlgorithmConfig | None = None
 
@@ -349,11 +404,12 @@ class AlgorithmConfig(BaseModel):
     router_dc: RouterDCSelectionConfig | None = None
     automix: AutoMixSelectionConfig | None = None
     hybrid: HybridSelectionConfig | None = None
+    multi_factor: MultiFactorSelectionConfig | None = None
+    session_aware: SessionAwareSelectionConfig | None = None
 
-    # RL-driven selection algorithms (from PR #1196, issue #994)
-    thompson: ThompsonSamplingConfig | None = None
+    # RL-driven and personalized selection algorithms
+    rl_driven: RLDrivenSelectionConfig | None = None
     gmtrouter: GMTRouterConfig | None = None
-    router_r1: RouterR1Config | None = None
 
     # Behavior on algorithm failure: "skip" or "fail"
     on_error: str | None = "skip"

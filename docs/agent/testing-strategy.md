@@ -30,6 +30,10 @@ This document defines the harness-side validation ladder for repository changes.
 - `make agent-e2e-affected CHANGED_FILES="..."`
   - explicit manual local E2E path for affected profiles when debugging or additional local confidence is needed
 
+`CHANGED_FILES` accepts comma-separated, whitespace-separated, or newline-separated
+paths. For long changed-file lists or paths that need exact shell preservation, write
+the paths one per line and pass `AGENT_CHANGED_FILES_PATH=<file>` instead.
+
 ## Selection Rules
 
 - Harness-only prose or manifest changes start with `make agent-validate`.
@@ -83,7 +87,7 @@ See [environments.md](environments.md) for the concrete commands.
 - Gate selection and commands: [../../tools/agent/task-matrix.yaml](../../tools/agent/task-matrix.yaml)
 - Environment resolution: [../../tools/agent/repo-manifest.yaml](../../tools/agent/repo-manifest.yaml)
 - E2E profile mapping: [../../tools/agent/e2e-profile-map.yaml](../../tools/agent/e2e-profile-map.yaml)
-- E2E taxonomy and suite selection guidance: [playbooks/e2e-selection.md](playbooks/e2e-selection.md)
+- E2E taxonomy and suite selection: [../../tools/agent/e2e-profile-map.yaml](../../tools/agent/e2e-profile-map.yaml)
 - Executable entrypoints: [../../tools/make/agent.mk](../../tools/make/agent.mk)
 - Done criteria: [feature-complete-checklist.md](feature-complete-checklist.md)
 - Local testcase rules: [../../e2e/testcases/AGENTS.md](../../e2e/testcases/AGENTS.md)

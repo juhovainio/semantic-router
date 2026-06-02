@@ -3,7 +3,9 @@ package classification
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
@@ -12,6 +14,65 @@ type embeddingPreloadResult struct {
 	candidate string
 	embedding []float32
 	err       error
+}
+
+// WarmupCandidateEmbeddings eagerly computes candidate embeddings when
+// preloading is enabled. Constructors intentionally do not call this because
+// model-backed FFI runtimes must be initialized before warmup starts.
+func (c *EmbeddingClassifier) WarmupCandidateEmbeddings() error {
+	if c == nil {
+		return fmt.Errorf("embedding classifier is nil")
+	}
+	if !c.preloadRequested {
+		logging.ComponentDebugEvent("classifier", "embedding_candidates_preload_skipped", map[string]interface{}{
+			"reason": "preload_disabled",
+		})
+		return nil
+	}
+	return c.ensureCandidateEmbeddings()
+}
+
+// preloadCandidateEmbeddings computes embeddings for all unique candidates across all rules.
+// Uses concurrent processing for better performance.
+func (c *EmbeddingClassifier) preloadCandidateEmbeddings() error {
+	startTime := time.Now()
+	candidates := c.collectUniqueCandidates()
+	if len(candidates) == 0 {
+		logging.ComponentDebugEvent("classifier", "embedding_candidates_preload_skipped", map[string]interface{}{
+			"reason": "no_candidates",
+		})
+		return nil
+	}
+
+	modelType := c.getModelType()
+	logging.ComponentDebugEvent("classifier", "embedding_candidates_preload_started", map[string]interface{}{
+		"candidates":       len(candidates),
+		"model_type":       modelType,
+		"target_dimension": c.optimizationConfig.TargetDimension,
+	})
+
+	numWorkers := c.preloadWorkerCount(len(candidates))
+	candidateEmbeddings, successCount, firstError := c.collectCandidateEmbeddingResults(
+		c.startCandidateEmbeddingWorkers(candidates, modelType, numWorkers),
+	)
+
+	elapsed := time.Since(startTime)
+	logging.ComponentEvent("classifier", "embedding_candidates_preloaded", map[string]interface{}{
+		"candidates":       successCount,
+		"total_candidates": len(candidates),
+		"model_type":       modelType,
+		"target_dimension": c.optimizationConfig.TargetDimension,
+		"workers":          numWorkers,
+		"elapsed_ms":       elapsed.Milliseconds(),
+	})
+
+	if firstError != nil {
+		return firstError
+	}
+
+	c.candidateEmbeddings = candidateEmbeddings
+	c.rebuildRulePrototypeBanks()
+	return nil
 }
 
 func (c *EmbeddingClassifier) collectUniqueCandidates() []string {
@@ -30,6 +91,12 @@ func (c *EmbeddingClassifier) collectUniqueCandidates() []string {
 }
 
 func (c *EmbeddingClassifier) preloadWorkerCount(candidateCount int) int {
+	if candidateCount <= 1 {
+		return 1
+	}
+	if strings.EqualFold(c.getBackend(), "candle") {
+		return 1
+	}
 	numWorkers := runtime.NumCPU() * 2
 	if numWorkers > candidateCount {
 		return candidateCount
@@ -56,12 +123,12 @@ func (c *EmbeddingClassifier) startCandidateEmbeddingWorkers(
 		go func() {
 			defer wg.Done()
 			for candidate := range candidateChan {
-				output, err := getEmbeddingWithModelType(candidate, modelType, c.optimizationConfig.TargetDimension)
+				embedding, err := c.computeEmbedding(candidate, modelType, "preload")
 				if err != nil {
 					resultChan <- embeddingPreloadResult{candidate: candidate, err: err}
 					continue
 				}
-				resultChan <- embeddingPreloadResult{candidate: candidate, embedding: output.Embedding}
+				resultChan <- embeddingPreloadResult{candidate: candidate, embedding: embedding}
 			}
 		}()
 	}
@@ -76,7 +143,8 @@ func (c *EmbeddingClassifier) startCandidateEmbeddingWorkers(
 
 func (c *EmbeddingClassifier) collectCandidateEmbeddingResults(
 	resultChan <-chan embeddingPreloadResult,
-) (int, error) {
+) (map[string][]float32, int, error) {
+	candidateEmbeddings := make(map[string][]float32)
 	var firstError error
 	successCount := 0
 	for res := range resultChan {
@@ -87,8 +155,8 @@ func (c *EmbeddingClassifier) collectCandidateEmbeddingResults(
 			logging.Warnf("Failed to compute embedding for candidate %q: %v", res.candidate, res.err)
 			continue
 		}
-		c.candidateEmbeddings[res.candidate] = res.embedding
+		candidateEmbeddings[res.candidate] = res.embedding
 		successCount++
 	}
-	return successCount, firstError
+	return candidateEmbeddings, successCount, firstError
 }

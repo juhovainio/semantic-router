@@ -11,10 +11,12 @@ from cli.algorithms import (
     EloSelectionConfig,
     GMTRouterConfig,
     HybridSelectionConfig,
+    MultiFactorSelectionConfig,
+    RatingsAlgorithmConfig,
     ReMoMAlgorithmConfig,
+    RLDrivenSelectionConfig,
     RouterDCSelectionConfig,
-    RouterR1Config,
-    ThompsonSamplingConfig,
+    SessionAwareSelectionConfig,
 )
 from pydantic import ValidationError as PydanticValidationError
 
@@ -24,7 +26,7 @@ class TestAlgorithmConfigTypes:
 
     def test_valid_looper_types(self):
         """Test that looper algorithm types are accepted."""
-        looper_types = ["confidence", "concurrent", "remom"]
+        looper_types = ["confidence", "ratings", "remom"]
 
         for algo_type in looper_types:
             config = AlgorithmConfig(type=algo_type)
@@ -38,10 +40,15 @@ class TestAlgorithmConfigTypes:
             "router_dc",
             "automix",
             "hybrid",
+            "knn",
+            "kmeans",
+            "svm",
+            "mlp",
+            "multi_factor",
             "latency_aware",
-            "thompson",
+            "session_aware",
+            "rl_driven",
             "gmtrouter",
-            "router_r1",
         ]
 
         for algo_type in selection_types:
@@ -164,35 +171,20 @@ class TestHybridSelectionConfig:
         assert abs(total - 1.0) < 0.01
 
 
-class TestThompsonSamplingConfig:
-    """Test Thompson Sampling (RL-driven) selection configuration."""
-
-    def test_default_values(self):
-        """Test Thompson Sampling config default values."""
-        config = ThompsonSamplingConfig()
-        assert config.prior_alpha == 1.0
-        assert config.prior_beta == 1.0
-        assert config.per_user is False
-        assert config.decay_factor == 0.0
-        assert config.min_samples == 10
-
-    def test_prior_validation(self):
-        """Test that priors must be positive."""
-        with pytest.raises(PydanticValidationError):
-            ThompsonSamplingConfig(prior_alpha=0.0)  # Must be > 0
-
-    def test_per_user_personalization(self):
-        """Test per-user personalization flag."""
-        config = ThompsonSamplingConfig(per_user=True)
-        assert config.per_user is True
-
-
 class TestGMTRouterConfig:
     """Test GMTRouter (GNN-based) selection configuration."""
 
     def test_default_values(self):
         """Test GMTRouter config default values."""
         config = GMTRouterConfig()
+        assert config.enable_personalization is True
+        assert config.history_sample_size == 5
+        assert config.embedding_dimension == 768
+        assert config.num_gnn_layers == 2
+        assert config.attention_heads == 8
+        assert config.min_interactions_for_personalization == 3
+        assert config.max_interactions_per_user == 100
+        assert config.feedback_types == ["rating", "ranking"]
         assert config.num_layers == 2
         assert config.hidden_dim == 64
         assert config.num_heads == 4
@@ -208,34 +200,98 @@ class TestGMTRouterConfig:
 
     def test_model_path(self):
         """Test GMTRouter config with model path."""
-        config = GMTRouterConfig(model_path="/models/gmtrouter.pt")
+        config = GMTRouterConfig(
+            model_path="/models/gmtrouter.pt",
+            storage_path="/var/lib/vsr/gmt_graph.json",
+            feedback_types=["rating", "ranking", "response"],
+        )
         assert config.model_path == "/models/gmtrouter.pt"
+        assert config.storage_path == "/var/lib/vsr/gmt_graph.json"
+        assert config.feedback_types == ["rating", "ranking", "response"]
 
 
-class TestRouterR1Config:
-    """Test Router-R1 (LLM-as-router) selection configuration."""
+class TestRLDrivenSelectionConfig:
+    """Test canonical rl_driven selection configuration."""
 
     def test_default_values(self):
-        """Test Router-R1 config default values."""
-        config = RouterR1Config()
-        assert config.router_endpoint is None
-        assert config.max_iterations == 3
-        assert config.temperature == 0.7
-        assert config.use_cot is True
-        assert config.fallback_to_static is True
+        """Test RL-driven config default values."""
+        config = RLDrivenSelectionConfig()
+        assert config.exploration_rate == 0.3
+        assert config.exploration_decay == 0.99
+        assert config.min_exploration == 0.05
+        assert config.use_thompson_sampling is True
+        assert config.enable_personalization is True
+        assert config.personalization_blend == 0.7
+        assert config.session_context_weight == 0.3
+        assert config.implicit_feedback_weight == 0.5
+        assert config.cost_awareness is True
+        assert config.cost_weight == 0.2
+        assert config.auto_save_interval == "30s"
+        assert config.use_router_r1_rewards is True
+        assert config.cost_reward_alpha == 0.3
+        assert config.format_reward_penalty == -1.0
 
-    def test_max_iterations_validation(self):
-        """Test that max_iterations is within valid range."""
+    def test_storage_and_router_r1_fields(self):
+        """Test persistence and Router-R1 fields."""
+        config = RLDrivenSelectionConfig(
+            storage_path="/var/lib/vsr/rl_state.json",
+            auto_save_interval="45s",
+            enable_llm_routing=True,
+            router_r1_server_url="http://router-r1:8080",
+            llm_routing_fallback="error",
+            enable_multi_round_aggregation=True,
+            max_aggregation_rounds=4,
+        )
+        assert config.storage_path == "/var/lib/vsr/rl_state.json"
+        assert config.auto_save_interval == "45s"
+        assert config.enable_llm_routing is True
+        assert config.router_r1_server_url == "http://router-r1:8080"
+        assert config.llm_routing_fallback == "error"
+        assert config.enable_multi_round_aggregation is True
+        assert config.max_aggregation_rounds == 4
+
+
+class TestSessionAwareSelectionConfig:
+    """Test session-aware selection configuration."""
+
+    def test_base_method_field(self):
+        """Test that session-aware uses base_method rather than fallback_method."""
+        config = SessionAwareSelectionConfig(base_method="static")
+        assert config.base_method == "static"
+
         with pytest.raises(PydanticValidationError):
-            RouterR1Config(max_iterations=0)  # Must be >= 1
+            SessionAwareSelectionConfig(fallback_method="static")
+
+    def test_cache_cost_multiplier_is_not_inverted(self):
+        """Expensive-model cache pressure must not become weaker than neutral."""
+        config = SessionAwareSelectionConfig(max_cache_cost_multiplier=1.0)
+        assert config.max_cache_cost_multiplier == 1.0
 
         with pytest.raises(PydanticValidationError):
-            RouterR1Config(max_iterations=20)  # Must be <= 10
+            SessionAwareSelectionConfig(max_cache_cost_multiplier=0.5)
 
-    def test_router_endpoint(self):
-        """Test Router-R1 config with endpoint."""
-        config = RouterR1Config(router_endpoint="http://localhost:8080")
-        assert config.router_endpoint == "http://localhost:8080"
+    def test_remaining_turn_prior_horizon_is_positive(self):
+        """The remaining-turn prior horizon must be explicit positive depth."""
+        config = SessionAwareSelectionConfig(remaining_turn_prior_horizon=1)
+        assert config.remaining_turn_prior_horizon == 1
+
+        with pytest.raises(PydanticValidationError):
+            SessionAwareSelectionConfig(remaining_turn_prior_horizon=0)
+
+
+class TestMultiFactorSelectionConfig:
+    """Test multi-factor selection configuration."""
+
+    def test_slo_and_weight_fields(self):
+        config = MultiFactorSelectionConfig(
+            weights={"quality": 0.4, "latency": 0.2, "cost": 0.2, "load": 0.2},
+            slo={"max_tpot_ms": 200, "max_ttft_ms": 800, "max_cost_per_1m": 5.0},
+            latency_percentile=95,
+            on_no_candidates="cheapest",
+        )
+        assert config.weights.quality == 0.4
+        assert config.slo.max_ttft_ms == 800
+        assert config.latency_percentile == 95
 
 
 class TestReMoMAlgorithmConfig:
@@ -276,14 +332,22 @@ class TestAlgorithmConfigIntegration:
         assert config.elo.min_comparisons == 10
 
     def test_rl_driven_algorithm_config(self):
-        """Test AlgorithmConfig with Thompson Sampling (RL-driven)."""
+        """Test AlgorithmConfig with canonical RL-driven config."""
         config = AlgorithmConfig(
-            type="thompson",
-            thompson=ThompsonSamplingConfig(per_user=True, min_samples=20),
+            type="rl_driven",
+            rl_driven=RLDrivenSelectionConfig(storage_path="/tmp/rl.json"),
         )
-        assert config.type == "thompson"
-        assert config.thompson.per_user is True
-        assert config.thompson.min_samples == 20
+        assert config.type == "rl_driven"
+        assert config.rl_driven.storage_path == "/tmp/rl.json"
+
+    def test_ratings_algorithm_config(self):
+        """Test AlgorithmConfig with ratings looper config."""
+        config = AlgorithmConfig(
+            type="ratings",
+            ratings=RatingsAlgorithmConfig(max_concurrent=3, on_error="skip"),
+        )
+        assert config.type == "ratings"
+        assert config.ratings.max_concurrent == 3
 
     def test_gmtrouter_algorithm_config(self):
         """Test AlgorithmConfig with GMTRouter."""
@@ -295,18 +359,30 @@ class TestAlgorithmConfigIntegration:
         assert config.gmtrouter.num_layers == 3
         assert config.gmtrouter.hidden_dim == 128
 
-    def test_router_r1_algorithm_config(self):
-        """Test AlgorithmConfig with Router-R1."""
+    def test_multi_factor_algorithm_config(self):
+        """Test AlgorithmConfig with multi_factor selection config."""
         config = AlgorithmConfig(
-            type="router_r1",
-            router_r1=RouterR1Config(
-                router_endpoint="http://localhost:8080",
-                max_iterations=5,
+            type="multi_factor",
+            multi_factor=MultiFactorSelectionConfig(
+                weights={"quality": 0.4, "latency": 0.2, "cost": 0.2, "load": 0.2}
             ),
         )
-        assert config.type == "router_r1"
-        assert config.router_r1.router_endpoint == "http://localhost:8080"
-        assert config.router_r1.max_iterations == 5
+        assert config.type == "multi_factor"
+        assert config.multi_factor.weights.quality == 0.4
+
+    def test_removed_algorithm_type_specific_blocks_are_rejected(self):
+        """Thompson and Router-R1 are rl_driven modes, not top-level algorithms."""
+        with pytest.raises(PydanticValidationError):
+            AlgorithmConfig(
+                type="thompson",
+                thompson={"per_user": True},
+            )
+
+        with pytest.raises(PydanticValidationError):
+            AlgorithmConfig(
+                type="router_r1",
+                router_r1={"router_endpoint": "http://localhost:8080"},
+            )
 
     def test_remom_algorithm_config(self):
         """Test AlgorithmConfig with ReMoM looper."""

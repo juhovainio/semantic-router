@@ -48,6 +48,7 @@ func (e EmbeddingModels) MinSimilarityThreshold() float32 {
 
 // HNSWConfig contains settings for optimizing embedding-backed classification.
 type HNSWConfig struct {
+	Backend            string                 `yaml:"backend,omitempty"`
 	ModelType          string                 `yaml:"model_type,omitempty"`
 	PreloadEmbeddings  bool                   `yaml:"preload_embeddings"`
 	TargetDimension    int                    `yaml:"target_dimension,omitempty"`
@@ -60,6 +61,9 @@ type HNSWConfig struct {
 
 func (c HNSWConfig) WithDefaults() HNSWConfig {
 	result := c
+	if result.Backend == "" {
+		result.Backend = "candle"
+	}
 	if result.ModelType == "" {
 		result.ModelType = "qwen3"
 	}
@@ -99,19 +103,17 @@ type MCPCategoryModel struct {
 // PromptCompressionConfig controls NLP-based prompt compression before signal extraction.
 type PromptCompressionConfig struct {
 	Enabled        bool     `yaml:"enabled"`
+	Profile        string   `yaml:"profile,omitempty"`
 	MaxTokens      int      `yaml:"max_tokens"`
 	MinLength      int      `yaml:"min_length,omitempty"`
 	SkipSignals    []string `yaml:"skip_signals,omitempty"`
 	TextRankWeight float64  `yaml:"textrank_weight,omitempty"`
 	PositionWeight float64  `yaml:"position_weight,omitempty"`
 	TFIDFWeight    float64  `yaml:"tfidf_weight,omitempty"`
+	NoveltyWeight  float64  `yaml:"novelty_weight,omitempty"`
 	PositionDepth  float64  `yaml:"position_depth,omitempty"`
-	// MaxEvaluationChars is a hard safety limit applied to evaluationText before
-	// any signal processing. Unlike prompt_compression (which is quality-aware and
-	// optional), this truncation always runs when set to a positive value.
-	// Default 0 means no limit. Recommended production value: 8192 (~2K tokens).
-	// Set to -1 to explicitly disable even if a future default is introduced.
-	MaxEvaluationChars int `yaml:"max_evaluation_chars,omitempty"`
+	PreserveFirstN int      `yaml:"preserve_first_n,omitempty"`
+	PreserveLastN  int      `yaml:"preserve_last_n,omitempty"`
 }
 
 func (pc PromptCompressionConfig) SkipSignalsSet() map[string]bool {

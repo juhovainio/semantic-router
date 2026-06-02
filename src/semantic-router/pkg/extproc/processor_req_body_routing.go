@@ -25,38 +25,37 @@ type routeHeaderState struct {
 	profile       *config.ProviderProfile
 }
 
-func (r *OpenAIRouter) selectEndpointForModel(ctx *RequestContext, model string) (string, string, error) {
-	endpointAddress, endpointName, endpointFound, err := r.Config.SelectBestEndpointWithDetailsForModel(model)
+func (r *OpenAIRouter) resolveBackendForModel(ctx *RequestContext, model string) (string, string, error) {
+	backendAddress, backendName, backendFound, err := r.Config.ResolvePrimaryBackendForModel(model)
 	if err != nil {
-		return "", "", fmt.Errorf("endpoint resolution for model %q: %w", model, err)
+		return "", "", fmt.Errorf("backend resolution for model %q: %w", model, err)
 	}
-	if endpointFound {
-		logging.ComponentDebugEvent("extproc", "endpoint_selected", map[string]interface{}{
-			"request_id":    ctx.RequestID,
-			"model":         model,
-			"endpoint":      endpointAddress,
-			"endpoint_name": endpointName,
+	if backendFound {
+		logging.ComponentDebugEvent("extproc", "backend_resolved", map[string]interface{}{
+			"request_id":      ctx.RequestID,
+			"model":           model,
+			"backend_address": backendAddress,
+			"backend_name":    backendName,
 		})
 	}
 
-	ctx.SelectedEndpoint = endpointAddress
 	metrics.IncrementModelActiveRequests(model)
 
-	return endpointAddress, endpointName, nil
+	return backendAddress, backendName, nil
 }
 
-// resolveModelNameForEndpoint resolves the model name alias to the real model name
-// that the backend endpoint expects, using external_model_ids configuration.
-func (r *OpenAIRouter) resolveModelNameForEndpoint(modelName string, endpointName string) string {
+// resolveModelNameForBackend resolves the model name alias to the real model
+// name that the backend expects, using external_model_ids configuration.
+func (r *OpenAIRouter) resolveModelNameForBackend(modelName string, backendName string) string {
 	if r.Config == nil {
 		return modelName
 	}
-	resolved := r.Config.ResolveExternalModelID(modelName, endpointName)
+	resolved := r.Config.ResolveExternalModelID(modelName, backendName)
 	if resolved != modelName {
 		logging.ComponentDebugEvent("extproc", "external_model_resolved", map[string]interface{}{
 			"requested_model": modelName,
 			"resolved_model":  resolved,
-			"endpoint_name":   endpointName,
+			"backend_name":    backendName,
 		})
 	}
 	return resolved
@@ -67,6 +66,7 @@ func (r *OpenAIRouter) modifyRequestBodyForAutoRouting(
 	matchedModel string,
 	decisionName string,
 	useReasoning bool,
+	profile *config.ProviderProfile,
 	ctx *RequestContext,
 ) ([]byte, error) {
 	openAIRequest.Model = matchedModel
@@ -79,7 +79,12 @@ func (r *OpenAIRouter) modifyRequestBodyForAutoRouting(
 	}
 
 	if decisionName != "" {
-		modifiedBody, err = r.setReasoningModeToRequestBody(modifiedBody, useReasoning, decisionName)
+		modifiedBody, err = r.setReasoningModeToRequestBodyForProvider(
+			modifiedBody,
+			useReasoning,
+			decisionName,
+			profile,
+		)
 		if err != nil {
 			logging.Errorf("Error setting reasoning mode %v to request: %v", useReasoning, err)
 			metrics.RecordRequestError(matchedModel, "serialization_error")
@@ -153,10 +158,12 @@ func resolveProviderAuth(profile *config.ProviderProfile) (authz.LLMProvider, st
 }
 
 // createRoutingResponse creates a routing response with request header/body mutations.
+// The router emits model/decision signals only; Envoy chooses upstream
+// endpoints inside the selected cluster.
 func (r *OpenAIRouter) createRoutingResponse(
 	model string,
-	endpoint string,
-	endpointName string,
+	backendAddress string,
+	backendName string,
 	modifiedBody []byte,
 	ctx *RequestContext,
 ) *ext_proc.ProcessingResponse {
@@ -172,11 +179,11 @@ func (r *OpenAIRouter) createRoutingResponse(
 	})
 
 	contentLength := len(modifiedBody)
-	state, errorResponse := r.buildRouteHeaderState(model, endpoint, endpointName, ctx, &contentLength)
+	state, errorResponse := r.buildRouteHeaderState(model, backendAddress, backendName, ctx, &contentLength)
 	if errorResponse != nil {
 		return errorResponse
 	}
-	if _, errorResponse := r.applyRoutingPathHeader(state, endpointName, ctx, false); errorResponse != nil {
+	if _, errorResponse := r.applyRoutingPathHeader(state, backendName, ctx, false); errorResponse != nil {
 		return errorResponse
 	}
 	r.applyDecisionHeaderMutations(state, ctx)
@@ -188,11 +195,11 @@ func (r *OpenAIRouter) createRoutingResponse(
 func (r *OpenAIRouter) createSpecifiedModelResponse(
 	model string,
 	upstreamModel string,
-	endpoint string,
-	endpointName string,
+	backendAddress string,
+	backendName string,
 	ctx *RequestContext,
 ) *ext_proc.ProcessingResponse {
-	state, errorResponse := r.buildRouteHeaderState(model, endpoint, endpointName, ctx, nil)
+	state, errorResponse := r.buildRouteHeaderState(model, backendAddress, backendName, ctx, nil)
 	if errorResponse != nil {
 		return errorResponse
 	}
@@ -220,7 +227,7 @@ func (r *OpenAIRouter) createSpecifiedModelResponse(
 		needsBodyMutation = true
 	}
 
-	pathMutatesBody, errorResponse := r.applyRoutingPathHeader(state, endpointName, ctx, true)
+	pathMutatesBody, errorResponse := r.applyRoutingPathHeader(state, backendName, ctx, true)
 	if errorResponse != nil {
 		return errorResponse
 	}
@@ -231,8 +238,8 @@ func (r *OpenAIRouter) createSpecifiedModelResponse(
 
 func (r *OpenAIRouter) buildRouteHeaderState(
 	model string,
-	endpoint string,
-	endpointName string,
+	backendAddress string,
+	backendName string,
 	ctx *RequestContext,
 	contentLength *int,
 ) (*routeHeaderState, *ext_proc.ProcessingResponse) {
@@ -247,25 +254,26 @@ func (r *OpenAIRouter) buildRouteHeaderState(
 		}
 	}
 
-	state.setHeaders = append(state.setHeaders, r.startUpstreamSpanAndInjectHeaders(model, endpoint, ctx)...)
+	state.setHeaders = append(state.setHeaders, r.startUpstreamSpanAndInjectHeaders(model, backendAddress, ctx)...)
 
-	profile, profileErr := r.Config.GetProviderProfileForEndpoint(endpointName)
+	profile, profileErr := r.Config.GetProviderProfileForEndpoint(backendName)
 	if profileErr != nil {
 		logging.ComponentErrorEvent("extproc", "provider_profile_resolution_failed", map[string]interface{}{
-			"request_id":    ctx.RequestID,
-			"endpoint_name": endpointName,
-			"error":         profileErr.Error(),
+			"request_id":   ctx.RequestID,
+			"backend_name": backendName,
+			"error":        profileErr.Error(),
 		})
 		return nil, r.createErrorResponse(500, "Internal routing error. Contact your administrator.")
 	}
 	state.profile = profile
 
-	if errorResponse := r.appendCredentialHeaders(state, model, endpointName, ctx); errorResponse != nil {
+	if errorResponse := r.appendCredentialHeaders(state, model, backendName, ctx); errorResponse != nil {
 		return nil, errorResponse
 	}
 	state.removeHeaders = append(state.removeHeaders, r.CredentialResolver.HeadersToStrip()...)
 	appendProfileHeaders(&state.setHeaders, profile)
-	appendRoutingHeaders(&state.setHeaders, model, endpoint)
+	appendCapturedPassThroughHeaders(&state.setHeaders, profile, ctx)
+	appendRoutingHeaders(&state.setHeaders, model)
 
 	return state, nil
 }
@@ -273,15 +281,15 @@ func (r *OpenAIRouter) buildRouteHeaderState(
 func (r *OpenAIRouter) appendCredentialHeaders(
 	state *routeHeaderState,
 	model string,
-	endpointName string,
+	backendName string,
 	ctx *RequestContext,
 ) *ext_proc.ProcessingResponse {
 	llmProvider, authHeader, authPrefix, authErr := resolveProviderAuth(state.profile)
 	if authErr != nil {
 		logging.ComponentErrorEvent("extproc", "provider_auth_resolution_failed", map[string]interface{}{
-			"request_id":    ctx.RequestID,
-			"endpoint_name": endpointName,
-			"error":         authErr.Error(),
+			"request_id":   ctx.RequestID,
+			"backend_name": backendName,
+			"error":        authErr.Error(),
 		})
 		return r.createErrorResponse(500, "Internal routing error. Contact your administrator.")
 	}
@@ -335,15 +343,42 @@ func appendProfileHeaders(setHeaders *[]*core.HeaderValueOption, profile *config
 	}
 }
 
-func appendRoutingHeaders(setHeaders *[]*core.HeaderValueOption, model string, endpoint string) {
-	if endpoint != "" {
+// appendCapturedPassThroughHeaders layers inbound Anthropic
+// pass-through headers (captured at the request-header phase into
+// IRExtensions) under the provider-profile pin. ExtraHeaders wins on
+// any collision so deployments can pin a known-tested anthropic-version
+// without the client forcing a different one.
+//
+// Sibling mechanism: requests routed to an Anthropic-native upstream
+// take a different path that forwards the same headers via
+// anthropic.BuildRequestHeadersWithPassthrough (pkg/anthropic), using
+// the AnthropicPassthrough carrier on RequestContext. The two paths
+// fire on disjoint routing branches.
+func appendCapturedPassThroughHeaders(
+	setHeaders *[]*core.HeaderValueOption,
+	profile *config.ProviderProfile,
+	ctx *RequestContext,
+) {
+	if ctx == nil || ctx.IRExtensions == nil {
+		return
+	}
+	for _, h := range anthropicPassThroughHeaders {
+		value := h.read(ctx.IRExtensions)
+		if value == "" {
+			continue
+		}
+		if profile != nil {
+			if _, pinned := profile.ExtraHeaders[h.name]; pinned {
+				continue
+			}
+		}
 		*setHeaders = append(*setHeaders, &core.HeaderValueOption{
-			Header: &core.HeaderValue{
-				Key:      headers.GatewayDestinationEndpoint,
-				RawValue: []byte(endpoint),
-			},
+			Header: &core.HeaderValue{Key: h.name, RawValue: []byte(value)},
 		})
 	}
+}
+
+func appendRoutingHeaders(setHeaders *[]*core.HeaderValueOption, model string) {
 	if model != "" {
 		*setHeaders = append(*setHeaders, &core.HeaderValueOption{
 			Header: &core.HeaderValue{
