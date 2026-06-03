@@ -123,6 +123,14 @@
   min-width: 0;
 }
 
+.costChart :global(.recharts-wrapper) {
+  overflow: visible !important;
+}
+
+.costChart :global(.recharts-surface) {
+  overflow: visible;
+}
+
 .chartTitle {
   display: flex;
   align-items: center;
